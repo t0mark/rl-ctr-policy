@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+cache/
+logs/
+*.log
+
+.vscode/
+.claude/
+CLAUDE.md
+
+reference/
+data/

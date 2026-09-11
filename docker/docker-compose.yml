@@ -1,0 +1,51 @@
+services:
+  isaaclab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ISAACLAB_VERSION: "2.3.2"
+    image: t0mark251/isaaclab:2.3.2
+    container_name: airlab_hw_isaaclab
+    network_mode: host
+    ipc: host
+    shm_size: "8gb"
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - DISPLAY=${DISPLAY}
+      - OMNI_KIT_ALLOW_ROOT=1
+    volumes:
+      # project workspace (repo root, one level above this compose file)
+      - ..:/workspace/dreamwaq
+      # X11 passthrough for Isaac Sim GUI viewport
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${HOME}/.Xauthority:/root/.Xauthority:rw
+      # Isaac Sim caches, kept across container rebuilds
+      - isaac-cache-kit:/isaac-sim/kit/cache
+      - isaac-cache-ov:/root/.cache/ov
+      - isaac-cache-pip:/root/.cache/pip
+      - isaac-cache-gl:/root/.cache/nvidia/GLCache
+      - isaac-cache-compute:/root/.nv/ComputeCache
+      - isaac-logs:/root/.nvidia-omniverse/logs
+      - isaac-data:/root/.local/share/ov/data
+      - isaac-docs:/root/Documents
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  isaac-cache-kit:
+  isaac-cache-ov:
+  isaac-cache-pip:
+  isaac-cache-gl:
+  isaac-cache-compute:
+  isaac-logs:
+  isaac-data:
+  isaac-docs:
