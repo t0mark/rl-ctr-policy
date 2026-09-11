@@ -1,0 +1,27 @@
+# dwaq(OnPolicyRunner)가 기대하는 학습 설정.
+# reference/legged_gym/legged_gym/envs/base/legged_robot_config.py의 LeggedRobotCfgPPO
+# (이미 ActorCritic_DWAQ/PPO 전용으로 튜닝된 값)를 그대로 포팅한 것이다.
+
+policy:
+  init_noise_std: 1.0
+  activation: elu
+
+algorithm:
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  entropy_coef: 0.01
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 1.0e-3
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+
+runner:
+  policy_class_name: ActorCritic_DWAQ
+  algorithm_class_name: PPO
+  num_steps_per_env: 24
+  save_interval: 50

@@ -32,9 +32,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from rsl_rl.modules import ActorCritic_DWAQ
-from rsl_rl.modules import ActorCritic
-from rsl_rl.storage import RolloutStorage
+from ..modules import ActorCritic_DWAQ
+from ..modules import ActorCritic
+from ..storage import RolloutStorage
 
 class PPO:
     actor_critic: ActorCritic_DWAQ
@@ -121,6 +121,16 @@ class PPO:
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self,beta=1):
+        """
+        PPO 클리핑 서로게이트 손실 + DreamWaQ 컨텍스트 인코더(CENet)의 베타-VAE 보조 손실을 함께 계산하고
+        옵티마이저 한 번으로 actor+critic+encoder+decoder를 동시에 업데이트한다.
+
+        Args:
+            beta (float): 컨텍스트 잠재변수(latent) KL 항의 가중치
+
+        Returns:
+            (mean_value_loss, mean_surrogate_loss, mean_autoenc_loss)
+        """
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_autoenc_loss = 0
@@ -155,10 +165,13 @@ class PPO:
                             param_group['lr'] = self.learning_rate
 
 
-                #Beta VAE loss
+                # Beta-VAE 보조 손실: 컨텍스트 인코더가 추정한 속도(code_vel)의 지도학습 타깃은
+                # privileged_obs 안에서 proprioceptive 관측(obs_batch와 같은 차원) 바로 다음에 오는
+                # 실제 base_lin_vel(3차원, xyz)이다.
                 code,code_vel,decode,mean_vel,logvar_vel,mean_latent,logvar_latent = self.actor_critic.cenet_forward(obs_hist_batch)
-                
-                vel_target = prev_critic_obs_batch[:,45:48]
+
+                proprio_obs_dim = obs_batch.shape[-1]
+                vel_target = prev_critic_obs_batch[:, proprio_obs_dim : proprio_obs_dim + 3]
                 decode_target = obs_batch
                 vel_target.requires_grad = False
                 decode_target.requires_grad = False

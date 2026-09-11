@@ -28,7 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from legged_gym import LEGGED_GYM_ROOT_DIR, envs
+from .paths import ROOT_DIR
 from time import time
 from warnings import WarningMessage
 import numpy as np
@@ -41,12 +41,11 @@ import torch
 from torch import Tensor
 from typing import Tuple, Dict
 
-from legged_gym import LEGGED_GYM_ROOT_DIR
-from legged_gym.envs.base.base_task import BaseTask
-from legged_gym.utils.terrain import Terrain
-from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, get_scale_shift
-from legged_gym.utils.helpers import class_to_dict
-from .legged_robot_config import LeggedRobotCfg
+from .base_task import BaseTask
+from .utils.terrain import Terrain
+from .utils.math_utils import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, get_scale_shift
+from .utils.helpers import class_to_dict
+from .env_cfg import LeggedRobotCfg
 from collections import deque
 
 class LeggedRobot(BaseTask):
@@ -84,9 +83,10 @@ class LeggedRobot(BaseTask):
         Args:
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
-        #self.obs_hist_buf.append(self.obs_buf) # append the latest obs into hist 
+        #self.obs_hist_buf.append(self.obs_buf) # append the latest obs into hist
         self.disturbance_force = self.disturbance_force.to(self.device)
-        self.obs_hist_buf = self.obs_hist_buf[:,45:]
+        # obs_hist_buf에서 가장 오래된 1-step 분량(self.num_obs개)을 버리고 최신 obs_buf를 뒤에 붙인다
+        self.obs_hist_buf = self.obs_hist_buf[:, self.num_obs:]
         self.obs_hist_buf = torch.cat((self.obs_hist_buf,self.obs_buf),dim = -1)
         # print("###########obs_hist_buf=====",self.obs_hist_buf)
         self.prev_privileged_obs_buf = self.privileged_obs_buf
@@ -161,9 +161,19 @@ class LeggedRobot(BaseTask):
             self._draw_debug_vis()
 
     def check_termination(self):
-        """ Check if environments need to be reset
+        """ 종료 여부를 판정한다. 종료 조건은 두 가지가 있다.
+            - 접촉 기반 종료 (torso_link 등이 실제로 무언가에 부딪혔을 때)
+            - 자세 기반 종료 (roll/pitch가 회복 불가능한 각도를 넘었을 때)
+
+            자세 기반 종료는 self.cfg.termination.roll_limit/pitch_limit이 None이 아닌 경우에만 적용된다.
         """
         self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
+
+        if self.cfg.termination.roll_limit is not None and self.cfg.termination.pitch_limit is not None:
+            roll, pitch, _ = get_euler_xyz(self.base_quat)
+            bad_orientation = (torch.abs(wrap_to_pi(roll)) > self.cfg.termination.roll_limit) | (torch.abs(wrap_to_pi(pitch)) > self.cfg.termination.pitch_limit)
+            self.reset_buf |= bad_orientation
+
         self.time_out_buf = self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs
         self.reset_buf |= self.time_out_buf
 
@@ -447,22 +457,23 @@ class LeggedRobot(BaseTask):
         
 
     def _compute_torques(self, actions):
-        """ Compute torques from actions.
-            Actions can be interpreted as position or velocity targets given to a PD controller, or directly as scaled torques.
-            [NOTE]: torques must have the same dimension as the number of DOFs, even if some DOFs are not actuated.
+        """ actions(self.num_actions 크기, 정책이 직접 출력한 값)를 PD 컨트롤러의 목표 오프셋으로 변환해 토크를 계산한다.
+            actions는 self.actuated_dof_indices 위치에만 배치되어 전체 관절(self.num_dof) 크기로 확장된다.
+            actuated_joint_names에 없는 관절(예: 팔)은 오프셋이 항상 0이라 default_dof_pos 그대로 PD 유지된다.
 
         Args:
-            actions (torch.Tensor): Actions
+            actions (torch.Tensor): 정책이 출력한 액션, shape (num_envs, self.num_actions)
 
         Returns:
-            [torch.Tensor]: Torques sent to the simulation
+            [torch.Tensor]: 시뮬레이션에 인가할 토크, shape (num_envs, self.num_dof)
         """
-        #pd controller
-        actions_scaled = actions * self.cfg.control.action_scale
+        # pd controller: 실제 제어 대상 관절에만 액션을 배치하고, 나머지 관절은 오프셋 0으로 둔다
+        actions_scaled = torch.zeros(self.num_envs, self.num_dof, dtype=torch.float, device=self.device)
+        actions_scaled[:, self.actuated_dof_indices] = actions * self.cfg.control.action_scale
         self.joint_pos_target = self.default_dof_pos + actions_scaled
         control_type = self.cfg.control.control_type
         if control_type=="P":
-            torques = self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains*self.dof_vel ## !!check the action later. Might be incorrect!!
+            torques = self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains*self.dof_vel
         elif control_type=="V":
             torques = self.p_gains*(actions_scaled - self.dof_vel) - self.d_gains*(self.dof_vel - self.last_dof_vel)/self.sim_params.dt
         elif control_type=="T":
@@ -551,28 +562,39 @@ class LeggedRobot(BaseTask):
 
 
     def _get_noise_scale_vec(self, cfg):
-        """ Sets a vector used to scale the noise added to the observations.
-            [NOTE]: Must be adapted when changing the observations structure
+        """ 관측값(obs_buf)에 더해질 노이즈의 스케일 벡터를 계산한다.
+
+        compute_observations()가 실제로 이어붙이는 순서
+        (base_ang_vel(3) -> projected_gravity(3) -> commands(3) -> dof_pos(self.num_dof)
+         -> dof_vel(self.num_dof) -> actions(self.num_actions))
+        를 기준으로 슬라이스 경계를 계산한다. dof_pos/dof_vel은 물리적으로 존재하는 관절 전체
+        (self.num_dof)의 상태이고, actions는 정책이 실제로 출력하는 값(self.num_actions)이라
+        두 값이 다를 수 있으므로 서로 다른 크기를 쓴다.
 
         Args:
-            cfg (Dict): Environment config file
+            cfg (Dict): 환경 설정값
 
         Returns:
-            [torch.Tensor]: Vector of scales used to multiply a uniform distribution in [-1, 1]
+            [torch.Tensor]: [-1, 1] 균등분포에 곱해질 노이즈 스케일 벡터
         """
         noise_vec = torch.zeros_like(self.obs_buf[0])
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
-        noise_vec[:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
-        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
-        noise_vec[6:9] = noise_scales.gravity * noise_level
-        noise_vec[9:12] = 0. # commands
-        noise_vec[12:24] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-        noise_vec[24:36] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        noise_vec[36:48] = 0. # previous actions
-        # if self.cfg.terrain.measure_heights:
-        #     noise_vec[48:235] = noise_scales.height_measurements* noise_level * self.obs_scales.height_measurements
+
+        idx = 0
+        noise_vec[idx : idx + 3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        idx += 3
+        noise_vec[idx : idx + 3] = noise_scales.gravity * noise_level
+        idx += 3
+        noise_vec[idx : idx + 3] = 0.  # 커맨드는 정책이 참조하는 목표값이라 노이즈를 주지 않음
+        idx += 3
+        noise_vec[idx : idx + self.num_dof] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        idx += self.num_dof
+        noise_vec[idx : idx + self.num_dof] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        idx += self.num_dof
+        noise_vec[idx : idx + self.num_actions] = 0.  # 직전 액션은 정책이 방금 출력한 값이라 노이즈를 주지 않음
+        idx += self.num_actions
         return noise_vec
 
     #----------------------------------------
@@ -609,9 +631,11 @@ class LeggedRobot(BaseTask):
         self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
         self.gravity_vec = to_torch(get_axis_params(-1., self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
         self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))
-        self.torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.p_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.d_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
+        # 토크/PD게인은 실제로 물리 시뮬레이션되는 관절 전체(self.num_dof) 크기다.
+        # RL이 직접 제어하지 않는 관절(actuated_joint_names에 없는 관절)도 PD로 기본자세를 유지해야 하므로 게인이 필요하다.
+        self.torques = torch.zeros(self.num_envs, self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+        self.p_gains = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+        self.d_gains = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.slast_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         
@@ -746,7 +770,7 @@ class LeggedRobot(BaseTask):
                 2.3 create actor with these properties and add them to the env
              3. Store indices of different bodies of the robot
         """
-        asset_path = self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        asset_path = self.cfg.asset.file.format(ROOT_DIR=ROOT_DIR)
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
 
@@ -783,6 +807,21 @@ class LeggedRobot(BaseTask):
         termination_contact_names = []
         for name in self.cfg.asset.terminate_after_contacts_on:
             termination_contact_names.extend([s for s in body_names if name in s])
+
+        # RL 정책이 실제로 제어하는 관절(cfg.control.actuated_joint_names에 매칭)이
+        # 전체 관절 배열(self.num_dof) 안에서 위치하는 인덱스.
+        # 매칭되지 않는 관절(예: 팔)은 이 인덱스에 없으므로 항상 기본자세로 PD 유지된다.
+        actuated_dof_names = [name for name in self.dof_names if any(key in name for key in self.cfg.control.actuated_joint_names)]
+        self.actuated_dof_indices = torch.tensor(
+            [self.dof_names.index(name) for name in actuated_dof_names],
+            dtype=torch.long, device=self.device, requires_grad=False,
+        )
+        if len(self.actuated_dof_indices) != self.num_actions:
+            raise ValueError(
+                f"actuated_joint_names 매칭 결과 관절 수({len(self.actuated_dof_indices)})가 "
+                f"cfg.env.num_actions({self.num_actions})와 다릅니다. cfg.control.actuated_joint_names "
+                f"또는 cfg.env.num_actions을 확인하세요."
+            )
 
         base_init_state_list = self.cfg.init_state.pos + self.cfg.init_state.rot + self.cfg.init_state.lin_vel + self.cfg.init_state.ang_vel
         self.base_init_state = to_torch(base_init_state_list, device=self.device, requires_grad=False)
@@ -1048,9 +1087,16 @@ class LeggedRobot(BaseTask):
 
 
     def _reward_smoothness(self):
-        diff = torch.square(self.joint_pos_target[:, :self.num_dof] - 2 * self.last_joint_pos_target[:, :self.num_dof] + self.last_last_joint_pos_target[:, :self.num_dof])
-        diff = diff * (self.last_actions[:, :self.num_dof] != 0)  # ignore first step
-        diff = diff * (self.slast_actions[:, :self.num_dof] != 0)  # ignore second step
+        """ 정책이 직접 제어하는 관절(self.actuated_dof_indices)에 대해서만 목표 각도의 2차 차분을 페널티로 준다.
+
+            joint_pos_target/last_joint_pos_target/last_last_joint_pos_target은 전체 관절 -> (self.num_dof) 크기이고,
+            last_actions/slast_actions는 정책이 실제로 출력하는 관절 -> (self.num_actions) 크기
+            두 크기가 다를 수 있으므로, 전체 관절 텐서를 actuated_dof_indices로 인덱싱해 num_actions 크기로 맞춘 뒤 계산한다.
+        """
+        actuated = self.actuated_dof_indices
+        diff = torch.square(self.joint_pos_target[:, actuated] - 2 * self.last_joint_pos_target[:, actuated] + self.last_last_joint_pos_target[:, actuated])
+        diff = diff * (self.last_actions != 0)  # ignore first step
+        diff = diff * (self.slast_actions != 0)  # ignore second step
         return torch.sum(diff, dim=1)
     
     def _reward_power_distribution(self):

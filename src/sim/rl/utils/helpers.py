@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -36,7 +36,7 @@ import random
 from isaacgym import gymapi
 from isaacgym import gymutil
 
-from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
+from legged_gym import ROOT_DIR
 
 def class_to_dict(obj) -> dict:
     if not  hasattr(obj,"__dict__"):
@@ -55,20 +55,11 @@ def class_to_dict(obj) -> dict:
         result[key] = element
     return result
 
-def update_class_from_dict(obj, dict):
-    for key, val in dict.items():
-        attr = getattr(obj, key, None)
-        if isinstance(attr, type):
-            update_class_from_dict(attr, val)
-        else:
-            setattr(obj, key, val)
-    return
-
 def set_seed(seed):
     if seed == -1:
         seed = np.random.randint(0, 10000)
     print("Setting seed: {}".format(seed))
-    
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -119,7 +110,7 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         models.sort(key=lambda m: '{0:0>15}'.format(m))
         model = models[-1]
     else:
-        model = "model_{}.pt".format(checkpoint) 
+        model = "model_{}.pt".format(checkpoint)
 
     load_path = os.path.join(load_run, model)
     return load_path
@@ -157,7 +148,7 @@ def get_args():
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
-        
+
         {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
         {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
@@ -177,23 +168,11 @@ def get_args():
         args.sim_device += f":{args.sim_device_id}"
     return args
 
-def export_policy_as_jit(actor_critic, path):
-    if hasattr(actor_critic, 'memory_a'):
-        # assumes LSTM: TODO add GRU
-        exporter = PolicyExporterLSTM(actor_critic)
-        exporter.export(path)
-    else: 
-        os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, 'policy_1.pt')
-        model = copy.deepcopy(actor_critic.actor).to('cpu')
-        traced_script_module = torch.jit.script(model)
-        traced_script_module.save(path)
-
 def export_policy_as_jit_actor(actor_critic, path):
         os.makedirs(path, exist_ok=True)
         path = os.path.join(path, 'actor_dwaq.pt')
         model = copy.deepcopy(actor_critic.actor).to('cpu')
-        print("policy model",model)        
+        print("policy model",model)
         traced_script_module = torch.jit.script(model)
         traced_script_module.save(path)
 
@@ -228,35 +207,3 @@ def export_policy_as_jit_encoder(actor_critic, path):
         print("vel var model",model)
         traced_script_module = torch.jit.script(model)
         traced_script_module.save(path5)
-
-
-
-class PolicyExporterLSTM(torch.nn.Module):
-    def __init__(self, actor_critic):
-        super().__init__()
-        self.actor = copy.deepcopy(actor_critic.actor)
-        self.is_recurrent = actor_critic.is_recurrent
-        self.memory = copy.deepcopy(actor_critic.memory_a.rnn)
-        self.memory.cpu()
-        self.register_buffer(f'hidden_state', torch.zeros(self.memory.num_layers, 1, self.memory.hidden_size))
-        self.register_buffer(f'cell_state', torch.zeros(self.memory.num_layers, 1, self.memory.hidden_size))
-
-    def forward(self, x):
-        out, (h, c) = self.memory(x.unsqueeze(0), (self.hidden_state, self.cell_state))
-        self.hidden_state[:] = h
-        self.cell_state[:] = c
-        return self.actor(out.squeeze(0))
-
-    @torch.jit.export
-    def reset_memory(self):
-        self.hidden_state[:] = 0.
-        self.cell_state[:] = 0.
- 
-    def export(self, path):
-        os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, 'policy_lstm_1.pt')
-        self.to('cpu')
-        traced_script_module = torch.jit.script(self)
-        traced_script_module.save(path)
-
-    

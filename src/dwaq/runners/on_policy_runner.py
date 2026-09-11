@@ -36,9 +36,9 @@ import statistics
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
-from rsl_rl.algorithms import PPO
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, ActorCritic_DWAQ
-from rsl_rl.env import VecEnv
+from ..algorithms import PPO
+from ..modules import ActorCritic, ActorCriticRecurrent, ActorCritic_DWAQ
+from ..env import VecEnv
 
 
 class OnPolicyRunner:
@@ -81,9 +81,10 @@ class OnPolicyRunner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self.best_score = float("-inf")
 
         _, _, _, _ = self.env.reset()
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!RESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESETRESET!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("------------------------------RESET------------------------------")
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
@@ -147,6 +148,16 @@ class OnPolicyRunner:
                 self.log(locals())
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+
+            # best 체크포인트 저장: 스텝당 평균 보상(mean_reward/mean_episode_length)이 가장 높은 모델을 best로 저장
+            if len(rewbuffer) > 0 and len(lenbuffer) > 0:
+                mean_episode_length = statistics.mean(lenbuffer)
+                if mean_episode_length > 0:
+                    score = statistics.mean(rewbuffer) / mean_episode_length
+                    if score > self.best_score:
+                        self.best_score = score
+                        self.save(os.path.join(self.log_dir, 'model_best.pt'), infos={'iter': it, 'score': score})
+
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations

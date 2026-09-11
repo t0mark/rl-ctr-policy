@@ -9,4 +9,6 @@ logs/
 CLAUDE.md
 
 reference/
-data/
+# data/
+*.pt
+events.out.tfevents.*

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -30,5 +30,8 @@
 
 import os
 
-LEGGED_GYM_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-LEGGED_GYM_ENVS_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, 'legged_gym', 'envs')
+# 이 파일(src/sim/rl/paths.py)에서 프로젝트 루트까지는 3단계 상위 폴더다: rl -> sim -> src -> 루트.
+# realpath(__file__)이 이미 "paths.py까지의 전체 경로"이므로, dirname을 4번 적용해야
+# (파일명 제거 1번 + rl->sim->src->루트 3번) 프로젝트 루트에 도달한다.
+# 데이터/에셋(data/robot/...) 같은 로봇별 파일 경로를 절대경로 없이 조립할 때 이 상수를 쓴다.
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))

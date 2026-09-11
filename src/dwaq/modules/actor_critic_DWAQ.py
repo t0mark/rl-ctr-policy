@@ -11,6 +11,7 @@ class ActorCritic_DWAQ(nn.Module):
         self.activation = get_activation(activation)
         actor_input_dim = num_actor_obs
         critic_input_dim = num_critic_obs
+        proprio_obs_dim = num_actor_obs - cenet_out_dim
 
         self.actor = nn.Sequential(
             nn.Linear(actor_input_dim,512),
@@ -48,7 +49,7 @@ class ActorCritic_DWAQ(nn.Module):
             self.activation,
             nn.Linear(64,128),
             self.activation,
-            nn.Linear(128,45)
+            nn.Linear(128,proprio_obs_dim)
         )
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
