@@ -31,4 +31,3 @@
 from .helpers import class_to_dict, get_load_path, get_args, set_seed
 from .logger import Logger
 from .math_utils import *
-from .terrain import Terrain

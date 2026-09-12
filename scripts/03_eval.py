@@ -1,4 +1,18 @@
-"""저장된 정규화와 결정적 context로 DreamWaQ 정책을 평가한다."""
+# Copyright (c) 2026 DreamWaQ Project
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""저장된 규격·정규화와 결정적 context로 학습된 정책을 평가한다.
+
+실행 명령어:
+    ./isaaclab.sh -p scripts/03_eval.py --mode pilot --phase 2 \
+        --checkpoint model_p2_5000.pt
+    ./isaaclab.sh -p scripts/03_eval.py --mode full --phase 2 --terrain flat \
+        --checkpoint model_p2_5000.pt --output data/eval/phase2_flat.json
+
+checkpoint는 data/robot/policy/{robot-id}/phase{phase}/{실행시각}/{checkpoint}에서 찾는다.
+--timestamp를 생략하면 해당 파일이 있는 가장 최근 run을 쓴다.
+"""
+
 import argparse
 import json
 import logging
@@ -12,29 +26,37 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 
-def resolve_checkpoint(robot_id, timestamp, filename):
-    """사용자가 지정한 run 또는 해당 파일이 존재하는 최신 run을 찾는다."""
-    root = _PROJECT_ROOT / "data/robot/policy" / robot_id
-    if timestamp is not None:
-        path = root / timestamp / filename
+def resolve_checkpoint(robot_id, phase, filename, timestamp=None, run_dir=None):
+    """학습 단계 폴더 아래에서 checkpoint를 찾는다."""
+    if run_dir is not None:
+        path = Path(run_dir) / filename
     else:
-        candidates = sorted(root.glob(f"*/{filename}"))
-        if not candidates:
-            raise FileNotFoundError(f"{root} 아래에서 {filename}을 찾지 못했습니다.")
-        path = candidates[-1]
+        root = _PROJECT_ROOT / "data/robot/policy" / robot_id / f"phase{phase}"
+        if timestamp is not None:
+            path = root / timestamp / filename
+        else:
+            candidates = sorted(root.glob(f"*/{filename}"))
+            if not candidates:
+                raise FileNotFoundError(f"{root} 아래에서 {filename}을 찾지 못했습니다.")
+            path = candidates[-1]
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise FileNotFoundError(f"{path}를 찾지 못했습니다.")
     return path
 
 
 def main():
     """고정 명령·seed·지형 조건으로 평가하고 추정 오차와 종료 수를 기록한다."""
-    parser = argparse.ArgumentParser(description="DreamWaQ G1 평가")
+    parser = argparse.ArgumentParser(description="DreamWaQ/Two-Phase G1 평가")
     parser.add_argument("--mode", choices=["pilot", "full"], default="pilot")
-    parser.add_argument("--robot_id", default="unitree_g1")
+    parser.add_argument("--robot-id", default="unitree_g1")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--timestamp")
-    parser.add_argument("--terrain", choices=["flat", "rough"], default="rough")
+    parser.add_argument("--timestamp",
+                       help="phase 폴더 안에서 사용할 실행 시각. 생략하면 가장 최근 run을 쓴다.")
+    parser.add_argument("--run-dir", type=Path,
+                       help="기본 경로 대신 직접 지정할 checkpoint 폴더")
+    parser.add_argument("--phase", type=int, choices=[1, 2], default=2,
+                       help="평가 지형으로 사용할 학습 단계")
+    parser.add_argument("--terrain", choices=["phase", "flat"], default="phase")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--vx", type=float, default=1.0)
@@ -51,20 +73,23 @@ def main():
     try:
         from src.sim.rl.dreamwaq_env import DreamWaQEnv
         from src.sim.rl.configs import ROBOT_ENV_CFGS
+        from src.sim.rl.env_cfg import configure_training_phase
         from src.sim.rl.models.dwaq_wrapper import DwaqVecEnvWrapper
         from src.dwaq.runners.on_policy_runner import OnPolicyRunner
 
         logging.basicConfig(level=logging.INFO)
-        path = resolve_checkpoint(args.robot_id, args.timestamp, args.checkpoint)
+        path = resolve_checkpoint(args.robot_id, args.phase, args.checkpoint,
+                                  args.timestamp, args.run_dir)
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        if checkpoint.get("format_version") != OnPolicyRunner.FORMAT_VERSION:
-            raise ValueError("구형 checkpoint는 새 논문 로직으로 평가할 수 없습니다.")
         cfg = ROBOT_ENV_CFGS[args.robot_id]()
         cfg.scene.num_envs = 4 if args.mode == "pilot" else 64
         cfg.seed = args.seed
         cfg.sim.device = args.device
         cfg.sim.save_logs_to_file = False
         cfg.sim.logging_level = "INFO"
+
+        # 학습과 같은 단계 설정으로 지형을 만든 뒤 평가 조건을 고정한다.
+        configure_training_phase(cfg, args.phase)
         cfg.observations.policy_current.enable_corruption = args.noise
         cfg.curriculum.terrain_levels = None
         if cfg.scene.terrain.terrain_generator is not None:
@@ -83,7 +108,7 @@ def main():
         env = DreamWaQEnv(cfg=cfg)
         wrapper = DwaqVecEnvWrapper(env)
         runner = OnPolicyRunner(wrapper, checkpoint["train_cfg"], device=args.device)
-        runner.load(path, load_optimizer=False)
+        runner.load(path, mode="evaluate")
         policy = runner.get_inference_policy()
         observation = wrapper.get_observations()
         squared_error = torch.zeros(3, device=args.device)
@@ -99,7 +124,7 @@ def main():
                 measured = torch.cat((observation["velocity"][:, :2],
                                       env.scene["robot"].data.root_ang_vel_b[:, 2:3]), -1)
                 tracking_error += (measured-command).abs().sum(0)
-                action = policy(observation["obs"], observation["history"])
+                action = policy(observation["history"])
                 observation, result = wrapper.step(action)
                 terminated_count += result["terminated"].sum()
                 truncated_count += (result["truncated"] & ~result["terminated"]).sum()
@@ -107,7 +132,8 @@ def main():
         count = max(step * wrapper.num_envs, 1)
         deaths, timeouts = int(terminated_count.item()), int(truncated_count.item())
         report = {
-            "checkpoint": str(path), "seed": args.seed, "terrain": args.terrain,
+            "checkpoint": str(path), "checkpoint_phase": int(checkpoint["phase"]),
+            "evaluation_phase": args.phase, "seed": args.seed, "terrain": args.terrain,
             "steps": step, "num_envs": wrapper.num_envs, "noise": args.noise,
             "command": [args.vx, args.vy, args.yaw_rate],
             "velocity_rmse_mps": (squared_error/count).sqrt().tolist(),

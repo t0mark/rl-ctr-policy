@@ -62,8 +62,6 @@ def _format_iteration_log(iteration, total_iterations, metrics, eta_seconds):
 class OnPolicyRunner:
     """시점·정규화·AdaBoot 조건을 보존하는 학습 루프."""
 
-    FORMAT_VERSION = 3
-
     def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
         """환경 계약으로 모델을 구성하고 설정을 보존한다."""
         self._env = env
@@ -75,18 +73,26 @@ class OnPolicyRunner:
         if runner_cfg["policy_class_name"] != "ActorCritic_DWAQ" or runner_cfg["algorithm_class_name"] != "PPO":
             raise ValueError("이 runner는 DreamWaQ/PPO 전용입니다.")
         self._model = ActorCritic_DWAQ(
-            env.num_obs + 19, env.num_privileged_obs, env.num_actions,
-            env.num_obs * env.num_obs_hist, **self._cfg["policy"]).to(self._device)
+            env.num_obs, env.num_privileged_obs, env.num_actions,
+            env.actor_history_length, env.estimator_history_length,
+            **self._cfg["policy"]).to(self._device)
         self._algorithm = PPO(self._model, **self._cfg["algorithm"])
         self._adaboot = AdaBoot(env.num_envs, self._device, **self._cfg["adaboot"])
         self._steps = runner_cfg["num_steps_per_env"]
         self._save_interval = runner_cfg["save_interval"]
         self._storage = RolloutStorage(env.num_envs, self._steps, env.num_obs,
-                                       env.num_privileged_obs, env.num_obs * env.num_obs_hist,
+                                       env.num_privileged_obs,
+                                       env.num_obs * env.actor_history_length,
                                        env.num_actions, self._device)
         self._log_dir = Path(log_dir) if log_dir is not None else None
+        self._phase = int(env.training_phase)
         self._iteration = 0
         self._normalization_initialized = False
+
+    @property
+    def phase(self):
+        """현재 학습 단계 번호를 반환한다."""
+        return self._phase
 
     @property
     def model(self):
@@ -115,7 +121,7 @@ class OnPolicyRunner:
                 with torch.no_grad():
                     for _ in range(self._steps):
                         use_estimate = torch.rand(self._env.num_envs, device=self._device) < probability
-                        policy = self._model.distribution(observation["obs"], observation["history"],
+                        policy = self._model.distribution(observation["history"],
                                                           observation["velocity"], use_estimate)
                         actions = policy.sample()
                         transition = {
@@ -161,9 +167,9 @@ class OnPolicyRunner:
                 eta_seconds = elapsed / (local_iteration + 1) * remaining
                 log.info(_format_iteration_log(self._iteration, total_iterations, metrics, eta_seconds))
                 if self._log_dir is not None and self._iteration % self._save_interval == 0:
-                    self.save(self._log_dir / f"model_{self._iteration}.pt")
+                    self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
             if self._log_dir is not None:
-                self.save(self._log_dir / f"model_{self._iteration}.pt")
+                self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
         finally:
             if writer is not None:
                 writer.close()
@@ -173,11 +179,11 @@ class OnPolicyRunner:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
-            "format_version": self.FORMAT_VERSION,
             "specification": self._env.specification,
             "train_cfg": self._cfg,
             "environment_configuration": self._env.training_configuration,
             "curriculum": self._env.curriculum_state(),
+            "phase": self._phase,
             "model_state_dict": self._model.state_dict(),
             "optimizer_state_dict": self._algorithm.state_dict(),
             "adaboot": self._adaboot.state_dict(),
@@ -185,27 +191,47 @@ class OnPolicyRunner:
             "normalization_initialized": self._normalization_initialized,
         }, path)
 
-    def load(self, path, load_optimizer=True):
-        """입력 규격과 설정이 다른 체크포인트를 명시적으로 거부한다."""
+    def load(self, path, mode="resume"):
+        """재개·단계 전환·평가를 구분해 체크포인트를 복원한다.
+
+        resume은 같은 단계의 학습을 그대로 이어가므로 학습 설정과 보상·명령 설정까지
+        완전히 같아야 한다. transfer는 1단계 정책을 2단계로 넘기는 경로이며,
+        관측·제어 규격은 동일해야 하지만 보상과 지형 설정의 차이는 허용한다.
+        """
+        if mode not in ("resume", "transfer", "evaluate"):
+            raise ValueError(f"지원하지 않는 checkpoint 사용 방식: {mode}")
         checkpoint = torch.load(path, map_location=self._device, weights_only=True)
-        if checkpoint.get("format_version") != self.FORMAT_VERSION:
-            raise ValueError("구형 체크포인트입니다. 논문 로직 버전은 새 학습이 필요합니다.")
         if checkpoint["specification"] != self._env.specification:
             raise ValueError("체크포인트의 관절·관측·action 규격이 현재 환경과 다릅니다.")
         if checkpoint["train_cfg"]["policy"] != self._cfg["policy"]:
             raise ValueError("체크포인트와 정책/정규화 설정이 다릅니다.")
-        if load_optimizer and checkpoint["train_cfg"] != self._cfg:
-            raise ValueError("학습 재개에는 저장된 학습 설정을 사용해야 합니다.")
-        if load_optimizer and checkpoint["environment_configuration"] != self._env.training_configuration:
-            raise ValueError("학습 재개 시 보상·관측·랜덤화·명령 설정이 다릅니다.")
+        if mode == "resume":
+            if checkpoint["phase"] != self._phase:
+                raise ValueError("다른 단계의 체크포인트입니다. 단계 전환에는 transfer를 사용하세요.")
+            if checkpoint["train_cfg"] != self._cfg:
+                raise ValueError("학습 재개에는 저장된 학습 설정을 사용해야 합니다.")
+            if checkpoint["environment_configuration"] != self._env.training_configuration:
+                raise ValueError("학습 재개 시 보상·관측·랜덤화·명령 설정이 다릅니다.")
+        if mode == "transfer" and checkpoint["phase"] + 1 != self._phase:
+            raise ValueError("transfer는 직전 단계의 체크포인트에서만 이어받을 수 있습니다.")
+
+        # 정규화 통계는 모델 버퍼에 있으므로 세 방식 모두 그대로 이어받는다.
         self._model.load_state_dict(checkpoint["model_state_dict"])
-        if load_optimizer:
+        self._normalization_initialized = checkpoint["normalization_initialized"]
+        if mode == "resume":
             self._algorithm.load_state_dict(checkpoint["optimizer_state_dict"])
             self._adaboot.load_state_dict(checkpoint["adaboot"])
             self._env.load_curriculum_state(checkpoint["curriculum"])
-        self._iteration = checkpoint["iteration"]
-        self._normalization_initialized = checkpoint["normalization_initialized"]
-        log.info("checkpoint=%s iteration=%d loaded", path, self._iteration)
+            self._iteration = checkpoint["iteration"]
+        elif mode == "transfer":
+            # 보상 구성이 바뀌어 gradient·return 스케일이 달라지므로
+            # optimizer 모멘텀과 AdaBoot return 통계는 이어받지 않는다.
+            self._env.load_curriculum_state(checkpoint["curriculum"])
+            self._iteration = 0
+        else:
+            self._iteration = checkpoint["iteration"]
+        log.info("checkpoint=%s mode=%s phase=%d iteration=%d loaded",
+                 path, mode, self._phase, self._iteration)
 
     def get_inference_policy(self, device=None):
         """정규화 갱신이나 실제 속도 입력 없이 결정적 정책을 반환한다."""

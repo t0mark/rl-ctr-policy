@@ -4,10 +4,11 @@
 """Unitree G1 보행 태스크 설정. src.sim.rl.env_cfg의 로봇 무관 공용 클래스를 상속해서
 G1(다리+허리 15 DOF만 RL 제어, 팔은 기본자세 PD 고정)에 맞는 값만 오버라이드한다.
 
-공용 베이스는 DreamWaQ 논문(사족보행 A1)의 값을 그대로 유지하고, 이족보행에서
-의미가 달라지는 항목만 Isaac Lab 공식 G1 예제
-(reference/isaac_lab/.../velocity/config/g1/rough_env_cfg.py)의 값으로 좁힌다.
-각 오버라이드의 계측 근거는 reference/dwaq_g1_test/dreamwaq_reward_tuning.md에 있다.
+공용 보상은 Two-Phase 논문의 명시 수식을 사용하며, G1용 안전 종료·관절 제한과
+하드웨어에 맞춘 자세·가속도 가중치를 함께 사용한다.
+
+Two-Phase 논문 항목(사인파 기준 동작 대상 관절, 위상 기반 보상의 좌우 링크 순서,
+좌우 발 지형 스캐너)도 여기에서 G1의 실제 관절·링크 이름으로 연결한다.
 """
 
 import os
@@ -21,6 +22,7 @@ from isaaclab.utils import configclass
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from src.sim.rl.env_cfg import RewardsCfg, VelocityEnvCfg
+from src.sim.rl.mdp import rewards as paper_rewards
 from src.sim.rl.paths import ROOT_DIR
 from src.sim.rl.mdp.actuators import StrengthPDActuatorCfg
 
@@ -37,47 +39,118 @@ G1_ACTUATED_JOINT_NAMES = [".*_hip_.*_joint", ".*_knee_joint", ".*_ankle_.*_join
 # 관절 가속도 페널티 대상. 공식 G1 예제와 동일하게 다리의 큰 관절만 대상으로 한다.
 G1_ACCELERATION_JOINT_NAMES = [".*_hip_.*_joint", ".*_knee_joint"]
 
+# 사인파 기준 동작 대상 관절. 좌우 목록은 같은 순서의 대칭 관절이어야 한다.
+G1_REFERENCE_JOINT_NAMES = {
+    "left": ["left_hip_pitch_joint", "left_knee_joint", "left_ankle_pitch_joint"],
+    "right": ["right_hip_pitch_joint", "right_knee_joint", "right_ankle_pitch_joint"],
+}
+
+# 위 관절 순서에 대응하는 스윙 진폭(rad). 무릎은 고관절의 두 배로 굽힌다.
+# 크기는 목표 발 높이를 내는 배율을 보행 후보 스윕에서 골라 정했다.
+G1_REFERENCE_JOINT_AMPLITUDES = [-0.354, 0.707, -0.354]
+
+# 스윙 최고점에서의 목표 발 높이(m). 위 진폭이 실제로 만드는 높이다.
+G1_FOOT_CLEARANCE_HEIGHT = 0.070
+
+# 좌우 발·무릎 간격 보상의 두 목표 거리(m). 논문 Table 4의 Feet&Knee distance 수식은
+# 두 목표 각각에 대한 지수 보상의 평균이며, 논문은 N1 기준 0.3과 0.125를 쓴다.
+G1_FOOT_DISTANCE_TARGETS = (0.12, 0.35)
+G1_KNEE_DISTANCE_TARGETS = (0.10, 0.30)
+
+# 좌우 발 링크. 위상 기반 보상이 [왼발, 오른발] 순서를 유지해야 하므로 명시적으로 나열한다.
+G1_FOOT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
+
+# 좌우 무릎 링크. 다리 간격 보상에서 발 간격과 함께 사용한다.
+G1_KNEE_BODY_NAMES = ["left_knee_link", "right_knee_link"]
+
 
 @configclass
 class G1Rewards(RewardsCfg):
-    """G1(이족보행)에 맞게 추가한 보상 항목.
+    """Two-Phase 보상에 G1의 링크 매핑과 안전 보상을 연결한다.
 
-    수치 출처: Isaac Lab 공식 G1 예제의 G1Rewards.
-    팔은 RL 제어 대상이 아니라 기본자세로 PD 고정되므로, 공식 예제의 팔 편차 항목은 두지 않는다.
+    기준 동작·접촉·공중 시간은 Two-Phase 수식을 사용한다.
+    관절 제한·종료 및 하드웨어 조정 가중치는 G1 설정을 사용한다.
+    팔은 RL 제어 대상이 아니므로 별도의 팔 자세 보상을 두지 않는다.
     """
 
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-50.0)
+    # 위상 편차에 대한 응답이 반복 잡음보다 작아 민감도를 얻지 못했다.
+    # 정상 동작 기여를 양의 보상 합의 2% 이내로 제한하는 크기다.
     feet_air_time = RewTerm(
-        func=mdp.feet_air_time_positive_biped,
-        weight=0.25,
-        params={
-            "command_name": "base_velocity",
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-            "threshold": 0.4,
-        },
+        func=paper_rewards.feet_air_time, weight=-17.2,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=G1_FOOT_BODY_NAMES,
+                                             preserve_order=True)},
     )
     feet_slide = RewTerm(
         func=mdp.feet_slide,
-        weight=-0.1,
+        weight=-1.86,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
         },
     )
+    # 정상 동작에서 원값이 0이라 수준으로도 크기를 정할 수 없다. 설정값을 유지한다.
     dof_pos_limits = RewTerm(
         func=mdp.joint_pos_limits,
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"])},
     )
-    joint_deviation_hip = RewTerm(
-        func=mdp.joint_deviation_l1,
-        weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_yaw_joint", ".*_hip_roll_joint"])},
+    # 사인파 기준 동작 추종. 학습 1단계에서만 활성화한다.
+    joint_position_tracking = RewTerm(
+        func=paper_rewards.joint_position_tracking,
+        weight=4.99,
+        params={"coefficient": 2.0, "asset_cfg": SceneEntityCfg("robot")},
     )
-    joint_deviation_waist = RewTerm(
-        func=mdp.joint_deviation_l1,
-        weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names="waist_.*_joint")},
+    # 스윙 위상에서 발이 접촉하는 경우를 벌한다.
+    gait_phase_contact = RewTerm(
+        func=paper_rewards.gait_phase_contact,
+        weight=-0.558,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=G1_FOOT_BODY_NAMES,
+                                         preserve_order=True),
+            "threshold": 1.0,
+        },
+    )
+    # 두 목표 발 간격에 가까울수록 보상한다.
+    feet_distance = RewTerm(
+        func=paper_rewards.lateral_distance,
+        weight=0.948,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=G1_FOOT_BODY_NAMES, preserve_order=True),
+            "minimum_distance": G1_FOOT_DISTANCE_TARGETS[0],
+            "maximum_distance": G1_FOOT_DISTANCE_TARGETS[1],
+        },
+    )
+    # 두 목표 무릎 간격에 가까울수록 보상한다.
+    knee_distance = RewTerm(
+        func=paper_rewards.lateral_distance,
+        weight=0.541,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=G1_KNEE_BODY_NAMES, preserve_order=True),
+            "minimum_distance": G1_KNEE_DISTANCE_TARGETS[0],
+            "maximum_distance": G1_KNEE_DISTANCE_TARGETS[1],
+        },
+    )
+    # 발바닥이 지면과 평행을 유지하도록 한다.
+    feet_orientation = RewTerm(
+        func=paper_rewards.feet_orientation,
+        weight=-26.9,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=G1_FOOT_BODY_NAMES,
+                                            preserve_order=True)},
+    )
+    # 몸통의 급격한 가속을 억제한다. 논문과 같은 유계 지수 보상이며 가중치도 논문값이다.
+    # 보상이 [0, 1]이라 가중치가 곧 기여 상한이고, 보행 속도 편차에 대한 민감도는
+    # 반복 잡음보다 작아 계측으로 정하지 않았다. 계수는 G1의 가속도 규모에 맞춘 값이다.
+    root_acceleration = RewTerm(
+        func=paper_rewards.root_acceleration,
+        weight=0.2,
+        params={"asset_cfg": SceneEntityCfg("robot"), "coefficient": 1.0e-5},
+    )
+    # 관절 떨림을 억제한다.
+    joint_vel_l2 = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-2.20e-3,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_ACTUATED_JOINT_NAMES)},
     )
 
 
@@ -99,24 +172,36 @@ class G1EnvCfg(VelocityEnvCfg):
             }) for name, cfg in self.scene.robot.actuators.items()
         }
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
+        self.scene.left_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/left_ankle_roll_link"
+        self.scene.right_foot_scanner.prim_path = "{ENV_REGEX_NS}/Robot/right_ankle_roll_link"
+        # 사인파 기준 동작은 다리의 pitch 관절에만 적용한다. 진폭 부호는 G1의 기본 자세 방향을 따른다.
+        self.gait.cycle_time_s = 0.66
+        self.gait.double_support_ratio = 0.1
+        self.gait.left_joint_names = G1_REFERENCE_JOINT_NAMES["left"]
+        self.gait.right_joint_names = G1_REFERENCE_JOINT_NAMES["right"]
+        self.gait.joint_amplitudes = G1_REFERENCE_JOINT_AMPLITUDES
         self.actions.joint_pos.joint_names = G1_ACTUATED_JOINT_NAMES
-        for event in (self.events.add_base_mass, self.events.base_com,
-                      self.events.base_external_force_torque, self.events.disturbance):
+        # 관절 관측은 RL 제어 대상만 본다. 기본값은 전체 관절이라, 
+        # 팔처럼 기본자세로 PD 고정된 비제어 관절까지 들어가 정보가 없는 입력 차원이 생긴다.
+        for group in (self.observations.policy_current, self.observations.critic):
+            for term in (group.joint_pos, group.joint_vel):
+                term.params = {"asset_cfg": SceneEntityCfg("robot",
+                                                           joint_names=G1_ACTUATED_JOINT_NAMES)}
+        self.actions.joint_pos.delay_range_s = (0.0, 0.010)
+        # 질량·무게중심 랜덤화는 몸통 링크만 대상으로 한다. 외란은 전체 링크에 적용한다.
+        for event in (self.events.add_base_mass, self.events.base_com):
             event.params["asset_cfg"].body_names = ["torso_link"]
         self.rewards.body_height.params["target_height"] = UNITREE_G1_CFG.init_state.pos[2]
-        self.rewards.feet_clearance.params["asset_cfg"].body_names = ".*_ankle_roll_link"
-        # power는 RL 제어 관절 전체를, 가속도는 다리의 큰 관절만 대상으로 합산한다.
-        for reward in (self.rewards.joint_power, self.rewards.power_distribution):
+        # 위상 mask와 순서를 맞추기 위해 발 링크를 [왼발, 오른발]로 고정한다.
+        self.rewards.feet_clearance.params["asset_cfg"].body_names = G1_FOOT_BODY_NAMES
+        self.rewards.feet_clearance.params["asset_cfg"].preserve_order = True
+        # 토크·기본 자세는 RL 제어 관절 전체를, 가속도는 다리의 큰 관절을 대상으로 한다.
+        for reward in (self.rewards.joint_power, self.rewards.default_joint_tracking):
             reward.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=G1_ACTUATED_JOINT_NAMES)
         self.rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=G1_ACCELERATION_JOINT_NAMES)
-        # 이족보행에서 의미가 달라지는 가중치를 공식 G1 예제 값으로 좁힌다.
         # 상하 진동은 이족보행의 정상 동작이므로 벌하지 않는다.
         self.rewards.lin_vel_z_l2.weight = 0.0
-        # 종료의 100%가 자세 이탈이므로 몸통 수평 유지 신호를 강화한다.
-        self.rewards.flat_orientation_l2.weight = -1.0
-        self.rewards.action_rate_l2.weight = -0.005
-        self.rewards.dof_acc_l2.weight = -1.25e-7
         self.commands.base_velocity.ranges.lin_vel_x = (-1.0, 1.0)
         self.commands.base_velocity.ranges.lin_vel_y = (-1.0, 1.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)

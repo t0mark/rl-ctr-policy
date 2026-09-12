@@ -40,8 +40,11 @@ class VecEnv(Protocol):
     num_envs: int
     num_obs: int
     num_privileged_obs: int
-    num_obs_hist: int
+    actor_history_length: int
+    critic_history_length: int
+    estimator_history_length: int
     num_actions: int
+    training_phase: int
     device: str
 
     def get_observations(self) -> dict[str, torch.Tensor]:

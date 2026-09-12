@@ -9,11 +9,11 @@ algorithm:
   use_clipped_value_loss: true
   clip_param: 0.2
   entropy_coef: 0.01
-  num_learning_epochs: 5
+  num_learning_epochs: 2
   num_mini_batches: 4
   learning_rate: 1.0e-3
   schedule: adaptive
-  gamma: 0.99
+  gamma: 0.995
   lam: 0.95
   desired_kl: 0.01
   max_grad_norm: 1.0
@@ -31,3 +31,12 @@ runner:
   algorithm_class_name: PPO
   num_steps_per_env: 24
   save_interval: 50
+
+# 학습 단계별 반복 수. 지형과 기준 동작 보상 활성 여부는 코드(configure_training_phase)가 정한다.
+phases:
+  phase1:
+    iterations: 3000
+    pilot_iterations: 20
+  phase2:
+    iterations: 5000
+    pilot_iterations: 20

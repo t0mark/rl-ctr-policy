@@ -37,10 +37,10 @@ from torch import nn
 class PPO:
     """고정된 정규화와 AdaBoot 선택으로 PPO ratio를 계산한다."""
 
-    def __init__(self, actor_critic, learning_rate=1e-3, num_learning_epochs=5,
-                 num_mini_batches=4, clip_param=0.2, gamma=0.99, lam=0.95,
+    def __init__(self, actor_critic, learning_rate=1e-5, num_learning_epochs=2,
+                 num_mini_batches=4, clip_param=0.2, gamma=0.995, lam=0.95,
                  value_loss_coef=1.0, entropy_coef=0.01, max_grad_norm=1.0,
-                 use_clipped_value_loss=True, schedule="adaptive", desired_kl=0.01,
+                 use_clipped_value_loss=True, schedule="fixed", desired_kl=0.01,
                  velocity_loss_coef=1.0, prediction_loss_coef=1.0, beta=1.0):
         """정책과 보조 손실의 가중치를 명시적으로 저장한다."""
         self.actor_critic = actor_critic
@@ -61,8 +61,9 @@ class PPO:
         totals = {}
         count = 0
         for batch in storage.batches(self._batches, self._epochs):
-            policy = self.actor_critic.distribution(
-                batch["obs"], batch["history"], batch["velocity"], batch["use_estimate"])
+            policy, velocity, prediction, latent_kl = self.actor_critic.training_terms(
+                batch["history"], batch["velocity"], batch["use_estimate"],
+                batch["next_obs"], batch["prediction_valid"])
             log_prob = policy.log_prob(batch["actions"]).sum(-1)
             values = self.actor_critic.evaluate(batch["critic"])
             with torch.no_grad():
@@ -86,8 +87,6 @@ class PPO:
                 clipped = batch["values"] + (values - batch["values"]).clamp(-self._clip, self._clip)
                 value_error = torch.maximum(value_error, (clipped - batch["returns"]).square())
             value_loss = value_error.mean()
-            velocity, prediction, latent_kl = self.actor_critic.auxiliary_losses(
-                batch["history"], batch["velocity"], batch["next_obs"], batch["prediction_valid"])
             entropy = policy.entropy().sum(-1).mean()
             loss = (surrogate + self._value_coef * value_loss - self._entropy_coef * entropy
                     + self._velocity_coef * velocity + self._prediction_coef * prediction
