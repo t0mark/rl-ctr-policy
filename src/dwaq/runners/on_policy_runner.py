@@ -32,6 +32,7 @@
 """DreamWaQ rollout 수집·학습·체크포인트를 관리한다."""
 import copy
 import logging
+import time
 from pathlib import Path
 
 import torch
@@ -44,11 +45,18 @@ from ..storage.rollout_storage import RolloutStorage
 
 log = logging.getLogger(__name__)
 
+# 이전 버전(rsl_rl 스타일) 배너 로그의 폭·라벨 정렬 칸수를 그대로 재사용한다.
+_LOG_WIDTH = 80
+_LOG_PAD = 35
 
-def _format_metrics(metrics):
-    """iteration 로그용으로 metrics를 키 정렬된 다중 행 문자열로 만든다."""
-    key_width = max(len(key) for key in metrics)
-    return "\n".join(f"  {key:<{key_width}} = {value:.6g}" for key, value in metrics.items())
+
+def _format_iteration_log(iteration, total_iterations, metrics, eta_seconds):
+    """구분선·중앙정렬 제목·우측정렬 라벨의 이전 배너 양식으로 iteration 로그를 만든다."""
+    title = f" Learning iteration {iteration}/{total_iterations} "
+    lines = ["#" * _LOG_WIDTH, title.center(_LOG_WIDTH, " "), ""]
+    lines += [f"{key + ':':>{_LOG_PAD}} {value:.6g}" for key, value in metrics.items()]
+    lines += ["-" * _LOG_WIDTH, f"{'ETA:':>{_LOG_PAD}} {eta_seconds:.1f}s"]
+    return "\n".join(lines)
 
 
 class OnPolicyRunner:
@@ -97,8 +105,10 @@ class OnPolicyRunner:
         episode_return = torch.zeros(self._env.num_envs, device=self._device)
         writer = SummaryWriter(str(self._log_dir)) if self._log_dir is not None else None
         self._model.train()
+        total_iterations = self._iteration + num_learning_iterations
+        learn_start_time = time.time()
         try:
-            for _ in range(num_learning_iterations):
+            for local_iteration in range(num_learning_iterations):
                 probability = self._adaboot.probability()
                 completed_returns = []
                 velocity_error = torch.zeros((), device=self._device)
@@ -146,7 +156,10 @@ class OnPolicyRunner:
                 for key, value in metrics.items():
                     if writer is not None:
                         writer.add_scalar(key, value, self._iteration)
-                log.info("iteration=%d\n%s", self._iteration, _format_metrics(metrics))
+                elapsed = time.time() - learn_start_time
+                remaining = num_learning_iterations - (local_iteration + 1)
+                eta_seconds = elapsed / (local_iteration + 1) * remaining
+                log.info(_format_iteration_log(self._iteration, total_iterations, metrics, eta_seconds))
                 if self._log_dir is not None and self._iteration % self._save_interval == 0:
                     self.save(self._log_dir / f"model_{self._iteration}.pt")
             if self._log_dir is not None:

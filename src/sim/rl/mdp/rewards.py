@@ -10,10 +10,10 @@ def joint_power(env, asset_cfg):
 
 
 def power_distribution(env, asset_cfg):
-    """관절별 부호 있는 power의 분산 제곱을 계산한다."""
+    """관절별 절대 power의 표본 분산을 계산한다."""
     robot = env.scene[asset_cfg.name]
     power = robot.data.applied_torque[:, asset_cfg.joint_ids] * robot.data.joint_vel[:, asset_cfg.joint_ids]
-    return power.var(-1, unbiased=False).square()
+    return power.abs().var(-1)
 
 
 def action_smoothness(env):

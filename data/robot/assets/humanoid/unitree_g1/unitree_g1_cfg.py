@@ -104,13 +104,14 @@ UNITREE_G1_CFG = ArticulationCfg(
             damping={".*_ankle_pitch_joint": 0.2, ".*_ankle_roll_joint": 0.1},
             armature=0.03,
         ),
+        # 게인은 공식 Isaac Lab G1 예제(isaaclab_assets.G1_CFG)의 torso_joint 값을 따른다.
         "waist": ImplicitActuatorCfg(
             joint_names_expr=["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"],
             effort_limit_sim=None,
             velocity_limit_sim=None,
-            stiffness=5000.0,
+            stiffness=200.0,
             damping=5.0,
-            armature=0.001,
+            armature=0.01,
         ),
         "arms": ImplicitActuatorCfg(
             joint_names_expr=[
