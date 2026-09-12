@@ -5,7 +5,8 @@
 
 --mode pilot: GUI 렌더링으로 실제 걷는 모습을 눈으로 확인한다.
 --mode full : GUI 없이(headless) 더 많은 환경으로 평가 지표(추적 오차/낙상률 등)를 집계한다.
---checkpoint는 파일명만 지정하면 data/robot/policy/{robot_id}/{가장 최근 학습 run}/{checkpoint}를 읽는다.
+--checkpoint는 파일명만 지정하면 data/robot/policy/{robot_id}/{timestamp}/{checkpoint}를 읽는다.
+--timestamp를 생략하면 가장 최근 학습 run 폴더를 자동으로 고른다.
 cmd_vel은 항상 전진(lin_vel_x 고정, lin_vel_y/ang_vel_z=0)만 나가도록 고정한다.
 
     실행 명령어:
@@ -37,6 +38,12 @@ parser.add_argument("--robot_id", type=str, default="unitree_g1", help="평가�
 parser.add_argument(
     "--checkpoint", type=str, required=True, help="체크포인트 파일명(예: model_2850.pt). 경로는 자동으로 찾는다."
 )
+parser.add_argument(
+    "--timestamp",
+    type=str,
+    default=None,
+    help="체크포인트가 들어있는 학습 run 폴더명(예: 20260911_191154). 생략하면 가장 최근 run을 쓴다.",
+)
 parser.add_argument("--terrain", type=str, choices=["flat", "rough"], default="rough", help="평지/험지 지형 선택.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -56,12 +63,16 @@ from src.sim.rl.models.dwaq_wrapper import DwaqVecEnvWrapper
 log = logging.getLogger(__name__)
 
 
-def _resolve_checkpoint_path(robot_id: str, checkpoint_filename: str) -> str:
-    """data/robot/policy/{robot_id}/ 아래에서 가장 최근 학습 run 폴더를 찾아 체크포인트 경로를 만든다."""
+def _resolve_checkpoint_path(robot_id: str, checkpoint_filename: str, timestamp: str | None) -> str:
+    """data/robot/policy/{robot_id}/{timestamp}/{checkpoint_filename} 경로를 지정한다.
+    """
     policy_root = os.path.join(_PROJECT_ROOT, "data", "robot", "policy", robot_id)
-    run_dirs = sorted(glob.glob(os.path.join(policy_root, "*")))
-    latest_run_dir = run_dirs[-1]
-    return os.path.join(latest_run_dir, checkpoint_filename)
+    if timestamp is not None:
+        run_dir = os.path.join(policy_root, timestamp)
+    else:
+        run_dirs = sorted(glob.glob(os.path.join(policy_root, "*")))
+        run_dir = run_dirs[-1]
+    return os.path.join(run_dir, checkpoint_filename)
 
 
 def main():
@@ -97,7 +108,7 @@ def main():
     with open(train_cfg_path, "r") as f:
         train_cfg = yaml.safe_load(f)
 
-    checkpoint_path = _resolve_checkpoint_path(args_cli.robot_id, args_cli.checkpoint)
+    checkpoint_path = _resolve_checkpoint_path(args_cli.robot_id, args_cli.checkpoint, args_cli.timestamp)
     runner = OnPolicyRunner(wrapped_env, train_cfg, log_dir=None, device=args_cli.device)
     runner.load(checkpoint_path)
     policy = runner.get_inference_policy(device=args_cli.device)
