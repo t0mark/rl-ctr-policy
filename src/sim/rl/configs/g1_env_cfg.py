@@ -17,6 +17,7 @@ import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from src.sim.rl.env_cfg import RewardsCfg, VelocityEnvCfg
 from src.sim.rl.paths import ROOT_DIR
+from src.sim.rl.mdp.actuators import StrengthPDActuatorCfg
 
 # data/robot/assets/humanoid/unitree_g1/unitree_g1_cfg.py를 찾기 위한 경로 추가.
 # (paths.py에서 이미 검증된 ROOT_DIR을 재사용한다 — 이 파일에서 dirname을 직접 다시 세면
@@ -89,55 +90,32 @@ class G1Rewards(RewardsCfg):
 
 @configclass
 class G1EnvCfg(VelocityEnvCfg):
-    """G1 전용 보행 환경 설정."""
+    """G1 관절·링크 매핑과 논문 보상 초기값을 연결한다."""
 
     rewards: G1Rewards = G1Rewards()
 
     def __post_init__(self):
+        """자산 gain을 explicit PD에 연결하고 MDP 대상을 G1에 맞춘다."""
         super().__post_init__()
-
-        # 로봇: 이번 프로젝트의 G1(손가락 없음, 29 DOF) ArticulationCfg
         self.scene.robot = UNITREE_G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        # 높이 스캐너: 다리에 덜 가려지는 torso_link에 부착 (Isaac Lab 공식 G1 예제와 동일)
-        self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
-
-        # 액션: 15개 관절(다리+허리)만 RL이 직접 제어. 나머지(팔)는 기본자세로 PD 고정된다.
-        self.actions.joint_pos.joint_names = G1_ACTUATED_JOINT_NAMES
-
-        # 도메인 랜덤화: 이족보행 균형 학습 안정성을 위해 초기 단계엔 밀치기/질량변화를 끈다.
-        self.events.push_robot = None
-        self.events.add_base_mass = None
-        self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
-        self.events.base_external_force_torque.params["asset_cfg"].body_names = ["torso_link"]
-        self.events.reset_base.params = {
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
-            "velocity_range": {
-                "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
-                "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
-            },
+        # 토크 배율을 직접 적용하는 explicit PD로 모든 관절을 제어한다.
+        self.scene.robot.actuators = {
+            name: StrengthPDActuatorCfg(**{
+                key: value for key, value in vars(cfg).items()
+                if not key.startswith("_") and key != "class_type"
+            }) for name, cfg in self.scene.robot.actuators.items()
         }
-        self.events.base_com = None
-
-        # 보상: 사족보행 기본값 중 G1에 안 맞는 것만 끄거나 조정
-        self.rewards.track_ang_vel_z_exp.weight = 2.0  # 기본값 0.5 -> G1 공식 예제 값 2.0
-        self.rewards.lin_vel_z_l2.weight = 0.0
-        self.rewards.undesired_contacts = None
-        self.rewards.flat_orientation_l2.weight = -1.0
-        self.rewards.action_rate_l2.weight = -0.005
-        self.rewards.dof_acc_l2.weight = -1.25e-7
-        self.rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg(
-            "robot", joint_names=[".*_hip_.*", ".*_knee_joint"]
-        )
-        self.rewards.dof_torques_l2.weight = -1.5e-7
-        self.rewards.dof_torques_l2.params["asset_cfg"] = SceneEntityCfg(
-            "robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]
-        )
-
-        # 명령: 전진 위주(뒤로 걷기/옆으로 걷기 없음)
-        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 1.0)
-        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
+        self.actions.joint_pos.joint_names = G1_ACTUATED_JOINT_NAMES
+        for event in (self.events.add_base_mass, self.events.base_com,
+                      self.events.base_external_force_torque, self.events.disturbance):
+            event.params["asset_cfg"].body_names = ["torso_link"]
+        self.rewards.body_height.params["target_height"] = UNITREE_G1_CFG.init_state.pos[2]
+        self.rewards.feet_clearance.params["asset_cfg"].body_names = ".*_ankle_roll_link"
+        # power와 가속도는 RL 제어 관절을 대상으로 합산한다.
+        for reward in (self.rewards.joint_power, self.rewards.power_distribution, self.rewards.dof_acc_l2):
+            reward.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=G1_ACTUATED_JOINT_NAMES)
+        self.commands.base_velocity.ranges.lin_vel_x = (-1.0, 1.0)
+        self.commands.base_velocity.ranges.lin_vel_y = (-1.0, 1.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)
-
-        # 종료: torso_link 접촉 시 종료 (roll/pitch 각도 종료는 아직 미적용 — 5단계 결정 사항이라
-        # 여기 이식은 별도 mdp 함수가 필요해서 다음 단계에서 추가한다)
         self.terminations.base_contact.params["sensor_cfg"].body_names = "torso_link"

@@ -28,190 +28,91 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
 
-from ..modules import ActorCritic_DWAQ
-from ..modules import ActorCritic
-from ..storage import RolloutStorage
+"""DreamWaQ 보조 손실을 함께 최적화하는 PPO."""
+import torch
+from torch import nn
+
 
 class PPO:
-    actor_critic: ActorCritic_DWAQ
-    def __init__(self,
-                 actor_critic,
-                 num_learning_epochs=1,
-                 num_mini_batches=1,
-                 clip_param=0.2,
-                 gamma=0.99,
-                 lam=0.95,
-                 value_loss_coef=1.0,
-                 entropy_coef=0.0,
-                 learning_rate=1e-3,
-                 max_grad_norm=1.0,
-                 use_clipped_value_loss=True,
-                 schedule="fixed",
-                 desired_kl=0.01,
-                 device='cpu',
-                 ):
+    """고정된 정규화와 AdaBoot 선택으로 PPO ratio를 계산한다."""
 
-        self.device = device
-
-        self.desired_kl = desired_kl
-        self.schedule = schedule
-        self.learning_rate = learning_rate
-
-        # PPO components
+    def __init__(self, actor_critic, learning_rate=1e-3, num_learning_epochs=5,
+                 num_mini_batches=4, clip_param=0.2, gamma=0.99, lam=0.95,
+                 value_loss_coef=1.0, entropy_coef=0.01, max_grad_norm=1.0,
+                 use_clipped_value_loss=True, schedule="adaptive", desired_kl=0.01,
+                 velocity_loss_coef=1.0, prediction_loss_coef=1.0, beta=1.0):
+        """정책과 보조 손실의 가중치를 명시적으로 저장한다."""
         self.actor_critic = actor_critic
-        self.actor_critic.to(self.device)
-        self.storage = None # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
-        self.transition = RolloutStorage.Transition()
+        self._optimizer = torch.optim.Adam(actor_critic.parameters(), lr=learning_rate)
+        self._epochs = num_learning_epochs
+        self._batches = num_mini_batches
+        self._clip = clip_param
+        self.gamma, self.lam = gamma, lam
+        self._value_coef, self._entropy_coef = value_loss_coef, entropy_coef
+        self._grad_norm = max_grad_norm
+        self._clipped_value = use_clipped_value_loss
+        self._schedule, self._desired_kl = schedule, desired_kl
+        self._velocity_coef, self._prediction_coef = velocity_loss_coef, prediction_loss_coef
+        self._beta = beta
 
-        # PPO parameters
-        self.clip_param = clip_param
-        self.num_learning_epochs = num_learning_epochs
-        self.num_mini_batches = num_mini_batches
-        self.value_loss_coef = value_loss_coef
-        self.entropy_coef = entropy_coef
-        self.gamma = gamma
-        self.lam = lam
-        self.max_grad_norm = max_grad_norm
-        self.use_clipped_value_loss = use_clipped_value_loss
+    def update(self, storage):
+        """각 손실을 표본 평균으로 계산하고 학습 결과를 반환한다."""
+        totals = {}
+        count = 0
+        for batch in storage.batches(self._batches, self._epochs):
+            policy = self.actor_critic.distribution(
+                batch["obs"], batch["history"], batch["velocity"], batch["use_estimate"])
+            log_prob = policy.log_prob(batch["actions"]).sum(-1)
+            values = self.actor_critic.evaluate(batch["critic"])
+            with torch.no_grad():
+                kl = (torch.log(policy.scale / batch["std"])
+                      + (batch["std"].square() + (batch["mean"] - policy.mean).square())
+                      / (2 * policy.scale.square()) - 0.5).sum(-1).mean()
+                if self._schedule == "adaptive" and self._desired_kl is not None:
+                    rate = self._optimizer.param_groups[0]["lr"]
+                    if kl > 2 * self._desired_kl:
+                        rate = max(1e-5, rate / 1.5)
+                    elif 0 < kl < self._desired_kl / 2:
+                        rate = min(1e-2, rate * 1.5)
+                    for group in self._optimizer.param_groups:
+                        group["lr"] = rate
+            ratio = (log_prob - batch["log_prob"]).exp()
+            surrogate = torch.maximum(
+                -batch["advantages"] * ratio,
+                -batch["advantages"] * ratio.clamp(1-self._clip, 1+self._clip)).mean()
+            value_error = (values - batch["returns"]).square()
+            if self._clipped_value:
+                clipped = batch["values"] + (values - batch["values"]).clamp(-self._clip, self._clip)
+                value_error = torch.maximum(value_error, (clipped - batch["returns"]).square())
+            value_loss = value_error.mean()
+            velocity, prediction, latent_kl = self.actor_critic.auxiliary_losses(
+                batch["history"], batch["velocity"], batch["next_obs"], batch["prediction_valid"])
+            entropy = policy.entropy().sum(-1).mean()
+            loss = (surrogate + self._value_coef * value_loss - self._entropy_coef * entropy
+                    + self._velocity_coef * velocity + self._prediction_coef * prediction
+                    + self._beta * latent_kl)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("PPO/CENet 손실에 비유한 값이 있습니다.")
+            self._optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self._grad_norm,
+                                                error_if_nonfinite=True)
+            self._optimizer.step()
+            metrics = {"surrogate": surrogate, "value": value_loss, "velocity": velocity,
+                       "prediction": prediction, "latent_kl": latent_kl, "policy_kl": kl,
+                       "entropy": entropy, "gradient_norm": grad_norm}
+            for key, value in metrics.items():
+                totals[key] = totals.get(key, 0.0) + value.detach()
+            count += 1
+        result = {key: (value / count).item() for key, value in totals.items()}
+        result["learning_rate"] = self._optimizer.param_groups[0]["lr"]
+        return result
 
-    def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape):
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, obs_hist_shape, action_shape, self.device)
+    def state_dict(self):
+        """optimizer 재개 상태를 반환한다."""
+        return self._optimizer.state_dict()
 
-    def test_mode(self):
-        self.actor_critic.test()
-    
-    def train_mode(self):
-        self.actor_critic.train()
-
-    def act(self, obs, critic_obs, prev_critic_obs, obs_history):
-        # if self.actor_critic.is_recurrent:
-        #     self.transition.hidden_states = self.actor_critic.get_hidden_states()
-        # Compute the actions and values
-        self.transition.actions = self.actor_critic.act(obs,obs_history).detach()
-        self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
-        self.transition.action_sigma = self.actor_critic.action_std.detach()
-        # need to record obs and critic_obs before env.step()
-        self.transition.observations = obs
-        self.transition.observation_history = obs_history
-        self.transition.critic_observations = critic_obs
-        self.transition.prev_critic_obs = prev_critic_obs
-        return self.transition.actions
-    
-    def process_env_step(self, rewards, dones, infos):
-        self.transition.rewards = rewards.clone()
-        self.transition.dones = dones
-        # Bootstrapping on time outs
-        if 'time_outs' in infos:
-            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
-
-        # Record the transition
-        self.storage.add_transitions(self.transition)
-        self.transition.clear()
-        self.actor_critic.reset(dones)
-    
-    def compute_returns(self, last_critic_obs):
-        last_values= self.actor_critic.evaluate(last_critic_obs).detach()
-        self.storage.compute_returns(last_values, self.gamma, self.lam)
-
-    def update(self,beta=1):
-        """
-        PPO 클리핑 서로게이트 손실 + DreamWaQ 컨텍스트 인코더(CENet)의 베타-VAE 보조 손실을 함께 계산하고
-        옵티마이저 한 번으로 actor+critic+encoder+decoder를 동시에 업데이트한다.
-
-        Args:
-            beta (float): 컨텍스트 잠재변수(latent) KL 항의 가중치
-
-        Returns:
-            (mean_value_loss, mean_surrogate_loss, mean_autoenc_loss)
-        """
-        mean_value_loss = 0
-        mean_surrogate_loss = 0
-        mean_autoenc_loss = 0
-        # if self.actor_critic.is_recurrent:
-        #     generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        # else:
-        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, critic_obs_batch, prev_critic_obs_batch, obs_hist_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
-
-
-                self.actor_critic.act(obs_batch, obs_hist_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
-                value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                mu_batch = self.actor_critic.action_mean
-                sigma_batch = self.actor_critic.action_std
-                entropy_batch = self.actor_critic.entropy
-
-                # KL
-                if self.desired_kl != None and self.schedule == 'adaptive':
-                    with torch.inference_mode():
-                        kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                        kl_mean = torch.mean(kl)
-
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                        
-                        for param_group in self.optimizer.param_groups:
-                            param_group['lr'] = self.learning_rate
-
-
-                # Beta-VAE 보조 손실: 컨텍스트 인코더가 추정한 속도(code_vel)의 지도학습 타깃은
-                # privileged_obs 안에서 proprioceptive 관측(obs_batch와 같은 차원) 바로 다음에 오는
-                # 실제 base_lin_vel(3차원, xyz)이다.
-                code,code_vel,decode,mean_vel,logvar_vel,mean_latent,logvar_latent = self.actor_critic.cenet_forward(obs_hist_batch)
-
-                proprio_obs_dim = obs_batch.shape[-1]
-                vel_target = prev_critic_obs_batch[:, proprio_obs_dim : proprio_obs_dim + 3]
-                decode_target = obs_batch
-                vel_target.requires_grad = False
-                decode_target.requires_grad = False
-                autoenc_loss = (nn.MSELoss()(code_vel,vel_target) + nn.MSELoss()(decode,decode_target) + beta*(-0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())))/self.num_mini_batches
-                # estimation_loss = (code[:,0:3] - prev_critic_obs_batch[:,45:48]).pow(2).mean()
-                # reconst_loss = (decode - obs_batch).pow(2).mean()
-                # latent_loss = beta*(-0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp()))/mean.shape[0]
-                # autoenc_loss = estimation_loss + reconst_loss + latent_loss
-                # Surrogate loss
-                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-                surrogate = -torch.squeeze(advantages_batch) * ratio
-                surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
-                                                                                1.0 + self.clip_param)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-
-                # Value function loss
-                if self.use_clipped_value_loss:
-                    value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param,
-                                                                                                    self.clip_param)
-                    value_losses = (value_batch - returns_batch).pow(2)
-                    value_losses_clipped = (value_clipped - returns_batch).pow(2)
-                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
-                else:
-                    value_loss = (returns_batch - value_batch).pow(2).mean()
-
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + autoenc_loss
-
-                # Gradient step
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
-                self.optimizer.step()
-
-                mean_value_loss += value_loss.item()
-                mean_surrogate_loss += surrogate_loss.item()
-                mean_autoenc_loss += autoenc_loss.item()
-
-        num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_value_loss /= num_updates
-        mean_surrogate_loss /= num_updates
-        self.storage.clear()
-
-        return mean_value_loss, mean_surrogate_loss, mean_autoenc_loss
+    def load_state_dict(self, state):
+        """optimizer 상태를 복원한다."""
+        self._optimizer.load_state_dict(state)

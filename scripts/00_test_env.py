@@ -33,7 +33,7 @@ sys.path.insert(0, _PROJECT_ROOT)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from isaaclab.envs import ManagerBasedRLEnv
+from src.sim.rl.dreamwaq_env import DreamWaQEnv
 from src.sim.rl.configs import ROBOT_ENV_CFGS
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def main():
     cfg.curriculum.terrain_levels = None
 
     # 환경 생성
-    env = ManagerBasedRLEnv(cfg=cfg)
+    env = DreamWaQEnv(cfg=cfg)
     joint_pos_term = env.action_manager.get_term("joint_pos")
     matched_names = joint_pos_term.IO_descriptor.joint_names
 

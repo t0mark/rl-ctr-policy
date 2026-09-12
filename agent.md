@@ -40,15 +40,3 @@
     2. 본 실행 및 컨테이너에서 수행할 작업 테스트
     3. 의존성 문제등 발생 시, 컨테이너 내부에서 해결 (Dockerfile 수정 X)
     4. 모든 의존성 문제 해결 완료 후, 도커 파일에 반영
-
-## Isaac Sim 관련 규칙
-
-- Isaac Sim 루프 실행 및 종료 방법
-    ```
-    env.reset()
-    while simulation_app.is_running():
-        env.step(default_actions)
-
-    env.close()
-    simulation_app.close()
-    ```

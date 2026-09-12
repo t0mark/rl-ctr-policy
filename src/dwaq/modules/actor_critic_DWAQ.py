@@ -1,166 +1,96 @@
-from __future__ import annotations
-
+"""현재 속도와 다음 관측을 학습하는 DreamWaQ 네트워크."""
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.distributions import Normal
 
+from .normalizer import RunningNormalizer
+
+
+def make_mlp(dimensions, activation):
+    """차원 목록으로 독립 활성화 함수를 가진 MLP를 구성한다."""
+    activations = {"elu": nn.ELU, "relu": nn.ReLU, "tanh": nn.Tanh}
+    if activation not in activations:
+        raise ValueError(f"지원하지 않는 활성화: {activation}")
+    layers = []
+    for index, (left, right) in enumerate(zip(dimensions, dimensions[1:])):
+        layers.append(nn.Linear(left, right))
+        if index < len(dimensions) - 2:
+            layers.append(activations[activation]())
+    return nn.Sequential(*layers)
+
+
 class ActorCritic_DWAQ(nn.Module):
-    def __init__(self, num_actor_obs, num_critic_obs, num_actions, cenet_in_dim, cenet_out_dim, activation="elu", init_noise_std=1.0,):
+    """정책은 평균 context를, VAE는 재매개화한 latent를 사용한다."""
+
+    def __init__(self, num_actor_obs, num_critic_obs, num_actions, cenet_in_dim,
+                 cenet_out_dim=19, activation="elu", init_noise_std=1.0,
+                 normalization_min_std=0.1):
+        """정책·가치·추정 네트워크와 정규화 통계를 생성한다."""
         super().__init__()
+        self._obs_dim = num_actor_obs - cenet_out_dim
+        if cenet_in_dim % self._obs_dim or init_noise_std <= 0:
+            raise ValueError("관측 이력 차원 또는 초기 표준편차가 잘못되었습니다.")
+        self._history_length = cenet_in_dim // self._obs_dim
+        self._actor = make_mlp([num_actor_obs, 512, 256, 128, num_actions], activation)
+        self._critic = make_mlp([num_critic_obs, 512, 256, 128, 1], activation)
+        self._encoder = nn.Sequential(make_mlp([cenet_in_dim, 128, 64], activation),
+                                      {"elu": nn.ELU, "relu": nn.ReLU, "tanh": nn.Tanh}[activation]())
+        self._velocity_head = nn.Linear(64, 3)
+        self._latent_mean = nn.Linear(64, cenet_out_dim - 3)
+        self._latent_logvar = nn.Linear(64, cenet_out_dim - 3)
+        self._decoder = make_mlp([cenet_out_dim, 64, 128, self._obs_dim], activation)
+        self._log_std = nn.Parameter(torch.full((num_actions,), float(init_noise_std)).log())
+        self._obs_normalizer = RunningNormalizer(self._obs_dim, normalization_min_std)
+        self._critic_normalizer = RunningNormalizer(num_critic_obs, normalization_min_std)
+        self._velocity_normalizer = RunningNormalizer(3, normalization_min_std)
 
-        self.activation = get_activation(activation)
-        actor_input_dim = num_actor_obs
-        critic_input_dim = num_critic_obs
-        proprio_obs_dim = num_actor_obs - cenet_out_dim
+    def encode(self, history):
+        """프레임별 동일 정규화를 적용해 속도와 latent 분포를 반환한다."""
+        frames = history.reshape(-1, self._history_length, self._obs_dim)
+        encoded = self._encoder(self._obs_normalizer(frames).flatten(1))
+        return (self._velocity_head(encoded), self._latent_mean(encoded),
+                self._latent_logvar(encoded).clamp(-10.0, 10.0))
 
-        self.actor = nn.Sequential(
-            nn.Linear(actor_input_dim,512),
-            self.activation,
-            nn.Linear(512,256),
-            self.activation,
-            nn.Linear(256,128),
-            self.activation,
-            nn.Linear(128,num_actions)
-        )
+    def distribution(self, observations, history, velocity_target=None, use_estimate=None):
+        """AdaBoot 선택을 유지한 조건부 action 분포를 반환한다."""
+        velocity, latent, _ = self.encode(history)
+        if velocity_target is not None:
+            if use_estimate is None:
+                raise ValueError("실제 속도 입력에는 AdaBoot 선택 mask가 필요합니다.")
+            velocity = torch.where(use_estimate.bool().reshape(-1, 1), velocity,
+                                   self._velocity_normalizer(velocity_target))
+        features = torch.cat((velocity, latent, self._obs_normalizer(observations)), -1)
+        mean = self._actor(features)
+        std = self._log_std.clamp(-5.0, 2.0).exp().expand_as(mean)
+        return Normal(mean, std)
 
-        self.critic = nn.Sequential(
-            nn.Linear(critic_input_dim,512),
-            self.activation,
-            nn.Linear(512,256),
-            self.activation,
-            nn.Linear(256,128),
-            self.activation,
-            nn.Linear(128,1)
-        )
+    def act_inference(self, observations, obs_history):
+        """실제 속도를 입력받지 않는 결정적 배포 정책을 실행한다."""
+        return self.distribution(observations, obs_history).mean
 
-        self.encoder = nn.Sequential(
-            nn.Linear(cenet_in_dim,128),
-            self.activation,
-            nn.Linear(128,64),
-            self.activation,
-        )
-        self.encode_mean_latent = nn.Linear(64,cenet_out_dim-3)
-        self.encode_logvar_latent = nn.Linear(64,cenet_out_dim-3)
-        self.encode_mean_vel = nn.Linear(64,3)
-        self.encode_logvar_vel = nn.Linear(64,3)
+    def estimate_velocity(self, history):
+        """추정 속도를 m/s 단위로 반환한다."""
+        return self._velocity_normalizer.inverse(self.encode(history)[0])
 
-        self.decoder = nn.Sequential(
-            nn.Linear(cenet_out_dim,64),
-            self.activation,
-            nn.Linear(64,128),
-            self.activation,
-            nn.Linear(128,proprio_obs_dim)
-        )
+    def evaluate(self, critic_observations):
+        """특권 관측에서 상태 가치를 계산한다."""
+        return self._critic(self._critic_normalizer(critic_observations)).squeeze(-1)
 
-        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        self.distribution = None
-        # disable args validation for speedup
-        Normal.set_default_validate_args = False
+    def auxiliary_losses(self, history, velocity_target, next_obs, prediction_valid):
+        """현재 속도·유효한 다음 관측·latent KL의 batch 평균을 계산한다."""
+        velocity, mean, logvar = self.encode(history)
+        latent = mean + torch.randn_like(mean) * (0.5 * logvar).exp()
+        prediction = self._decoder(torch.cat((velocity, latent), -1))
+        velocity_loss = (velocity - self._velocity_normalizer(velocity_target)).square().mean()
+        per_sample = (prediction - self._obs_normalizer(next_obs)).square().mean(-1)
+        valid = prediction_valid.to(per_sample.dtype)
+        prediction_loss = (per_sample * valid).sum() / valid.sum().clamp_min(1)
+        kl_loss = (-0.5 * (1 + logvar - mean.square() - logvar.exp()).sum(-1)).mean()
+        return velocity_loss, prediction_loss, kl_loss
 
-        # seems that we get better performance without init
-        # self.init_memory_weights(self.memory_a, 0.001, 0.)
-        # self.init_memory_weights(self.memory_c, 0.001, 0.)
-
-    @staticmethod
-    # not used at the moment
-    def init_weights(sequential, scales):
-        [
-            torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
-            for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
-        ]
-
-    def reset(self, dones=None):
-        pass
-
-    def forward(self):
-        raise NotImplementedError
-    
-    def reparameterise(self,mean,logvar):
-        var = torch.exp(logvar*0.5)
-        code_temp = torch.randn_like(var)
-        code = mean + var*code_temp
-        return code
-    
-    def cenet_forward(self,obs_history):
-        distribution = self.encoder(obs_history)
-        mean_latent = self.encode_mean_latent(distribution)
-        logvar_latent = self.encode_logvar_latent(distribution)
-        # var = torch.exp(logvar_latent*0.5)
-        # code_temp = torch.randn_like(var)
-        # code = mean_latent + var*code_temp
-        # print("latent : ",code[0])
-        mean_vel = self.encode_mean_vel(distribution)
-        logvar_vel = self.encode_logvar_vel(distribution)
-        code_latent = self.reparameterise(mean_latent,logvar_latent)
-        code_vel = self.reparameterise(mean_vel,logvar_vel)
-        code = torch.cat((code_vel,code_latent),dim=-1)
-        decode = self.decoder(code)
-        return code,code_vel,decode,mean_vel,logvar_vel,mean_latent,logvar_latent
-
-    @property
-    def action_mean(self):
-        return self.distribution.mean
-
-    @property
-    def action_std(self):
-        return self.distribution.stddev
-
-    @property
-    def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
-
-    def update_distribution(self, observations):
-        mean = self.actor(observations)
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
-
-    def act(self, observations, obs_history, **kwargs):
-        code,_,decode,_,_,_,_ = self.cenet_forward(obs_history)
-        observations = torch.cat((code,observations),dim=-1)
-        self.update_distribution(observations)
-        return self.distribution.sample()
-
-    def get_actions_log_prob(self, actions):
-        return self.distribution.log_prob(actions).sum(dim=-1)
-
-    def act_inference(self, observations,obs_history):
-        code,_,decode,_,_,_,_ = self.cenet_forward(obs_history)
-        observations = torch.cat((code,observations),dim=-1)
-        actions_mean = self.actor(observations)
-        return actions_mean
-
-    def evaluate(self, critic_observations, **kwargs):
-        value = self.critic(critic_observations)
-        return value
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-def get_activation(act_name):
-    if act_name == "elu":
-        return nn.ELU()
-    elif act_name == "selu":
-        return nn.SELU()
-    elif act_name == "relu":
-        return nn.ReLU()
-    elif act_name == "crelu":
-        return nn.CReLU()
-    elif act_name == "lrelu":
-        return nn.LeakyReLU()
-    elif act_name == "tanh":
-        return nn.Tanh()
-    elif act_name == "sigmoid":
-        return nn.Sigmoid()
-    else:
-        print("invalid activation function!")
-        return None
+    @torch.no_grad()
+    def update_normalizers(self, observations, critic_observations, velocity):
+        """rollout와 PPO 갱신 사이 경계에서만 통계를 갱신한다."""
+        self._obs_normalizer.update(observations)
+        self._critic_normalizer.update(critic_observations)
+        self._velocity_normalizer.update(velocity)

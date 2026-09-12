@@ -36,6 +36,8 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 # Isaac Lab이 기본 제공하는 mdp 항목 함수/커맨드 cfg를 그대로 재사용한다
 # (feet_air_time_positive_biped, joint_deviation_l1, UniformVelocityCommandCfg 등 포함).
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
+from src.sim.rl.mdp import rewards as paper_rewards, events as paper_events
+from src.sim.rl.mdp.velocity_command import GridVelocityCommandCfg
 
 ##
 # Scene definition (로봇 무관 공용)
@@ -101,12 +103,12 @@ class MySceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     """속도 명령 사양."""
 
-    base_velocity = mdp.UniformVelocityCommandCfg(
+    base_velocity = GridVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
         rel_standing_envs=0.02,
-        rel_heading_envs=1.0,
-        heading_command=True,
+        rel_heading_envs=0.0,
+        heading_command=False,
         heading_control_stiffness=0.5,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
@@ -119,28 +121,18 @@ class CommandsCfg:
 class ActionsCfg:
     """액션 사양. joint_names는 로봇별 파일에서 실제 제어 대상 관절로 좁혀서 오버라이드한다."""
 
-    joint_pos = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[".*"], scale=0.5, use_default_offset=True)
+    joint_pos = paper_events.DelayedJointPositionActionCfg(
+        asset_name="robot", joint_names=[".*"], scale=0.5, use_default_offset=True
+    )
 
 
 @configclass
 class ObservationsCfg:
-    """policy_current(현재 스텝 관측)/policy(그 이력)/critic 세 그룹으로 나눈 관측 사양.
-
-    dwaq(DreamWaQ PPO)는 "현재 스텝 고유수용감각(obs)"과 "flatten된 관측 이력(obs_hist)"을
-    별도 텐서 두 개로 요구한다. Isaac Lab의 그룹 history_length 기능은 term별로 각자의
-    이력을 flatten한 뒤 term끼리 이어붙이는 방식이라(시간 순서로 안 묶임), 이 그룹(policy)의
-    출력에서 "마지막 스텝"만 잘라내는 방법으로는 현재 스텝 전체를 복원할 수 없다.
-    그래서 이력이 없는 policy_current 그룹을 별도로 둬서 "현재 스텝 obs"를 직접 얻는다.
-    """
+    """현재 관측·특권 관측·속도 타깃을 분리하고 이력은 wrapper가 관리한다."""
 
     @configclass
     class PolicyCurrentCfg(ObsGroup):
-        """actor가 매 스텝 그대로 쓰는 현재 시점 고유수용감각. 노이즈 포함, 이력 없음.
-
-        아래 PolicyCfg(이력 그룹)와 반드시 동일한 term 구성·순서를 유지해야 한다 — dwaq PPO의
-        actor는 이 그룹의 출력을 그대로 쓰고, PolicyCfg는 이 관측들의 시간 이력을 컨텍스트
-        인코더(CENet) 입력으로 제공한다.
-        """
+        """actor가 읽는 현재 시점의 단일 noisy 표본."""
 
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
@@ -150,78 +142,51 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
+            """현재 관측을 연결하고 센서 노이즈를 활성화한다."""
             self.enable_corruption = True
             self.concatenate_terms = True
 
     @configclass
-    class PolicyCfg(ObsGroup):
-        """PolicyCurrentCfg와 동일한 관측의 이력(history). 컨텍스트 인코더(CENet) 입력 전용.
+    class CriticCfg(PolicyCurrentCfg):
+        """속도·실제 외란·높이 scan을 추가한 무잡음 특권 관측."""
 
-        base_lin_vel(속도)과 height_scan(지형)은 일부러 안 넣는다 — DreamWaQ 설계상 actor는
-        이 정보를 직접 보지 않고, 이 그룹의 이력(history)을 컨텍스트 인코더에 넣어 암묵적으로
-        추정한다("Implicit Terrain Imagination").
-        """
-
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
-        projected_gravity = ObsTerm(func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05))
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
-        actions = ObsTerm(func=mdp.last_action)
-
-        def __post_init__(self):
-            self.enable_corruption = True
-            self.concatenate_terms = True
-            # DreamWaQ 컨텍스트 인코더 입력용 이력 길이. 로봇별 파일에서 관절 수가 정해지면
-            # cenet_in_dim = history_length * (이 그룹의 1-step 차원)으로 계산한다.
-            self.history_length = 5
-            self.flatten_history_dim = True
-
-    @configclass
-    class CriticCfg(ObsGroup):
-        """critic이 보는 관측: PolicyCurrentCfg와 같은 항목 + 특권 정보. 노이즈/이력 없음.
-
-        dwaq PPO는 이 그룹의 [num_obs : num_obs+3] 구간을 base_lin_vel(속도 정답)로 그대로
-        슬라이싱한다(prev_critic_obs_batch[:, proprio_obs_dim:proprio_obs_dim+3]). 그래서
-        term 순서가 반드시 [PolicyCurrentCfg와 동일한 순서의 proprioception 블록] ->
-        [base_lin_vel] -> [height_scan] 이어야 한다. 순서를 바꾸면 안 된다.
-        """
-
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
-        projected_gravity = ObsTerm(func=mdp.projected_gravity)
-        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel)
-        actions = ObsTerm(func=mdp.last_action)
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
-        height_scan = ObsTerm(
-            func=mdp.height_scan,
-            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
-            clip=(-1.0, 1.0),
-        )
+        disturbance = ObsTerm(func=paper_events.disturbance_body)
+        height_scan = ObsTerm(func=mdp.height_scan,
+                             params={"sensor_cfg": SceneEntityCfg("height_scanner")}, clip=(-1.0, 1.0))
 
         def __post_init__(self):
+            """critic에는 센서 노이즈를 적용하지 않는다."""
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    @configclass
+    class VelocityTargetCfg(ObsGroup):
+        """critic 배열 위치와 무관한 현재 body 속도 정답."""
+
+        velocity = ObsTerm(func=mdp.base_lin_vel)
+
+        def __post_init__(self):
+            """물리 단위의 속도 벡터를 반환한다."""
             self.enable_corruption = False
             self.concatenate_terms = True
 
     policy_current: PolicyCurrentCfg = PolicyCurrentCfg()
-    policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
-
+    velocity_target: VelocityTargetCfg = VelocityTargetCfg()
 
 @configclass
 class EventCfg:
     """도메인 랜덤화 이벤트."""
 
-    # PD 게인(stiffness/damping) 랜덤화. implicit actuator는 CPU 텐서를 쓰므로
-    # 매 스텝이 아닌 환경 초기화 시점(mode="startup")에만 적용한다.
+    # PD 게인 랜덤화는 환경 초기화 시 한 번 적용한다.
     randomize_actuator_gains = EventTerm(
         func=mdp.randomize_actuator_gains,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "stiffness_distribution_params": (0.8, 1.2),
-            "damping_distribution_params": (0.8, 1.2),
+            "stiffness_distribution_params": (0.9, 1.1),
+            "damping_distribution_params": (0.9, 1.1),
             "operation": "scale",
             "distribution": "uniform",
         },
@@ -231,10 +196,11 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 0.8),
-            "dynamic_friction_range": (0.6, 0.6),
+            "static_friction_range": (0.2, 1.25),
+            "dynamic_friction_range": (0.2, 1.25),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
+            "make_consistent": True,
         },
     )
     add_base_mass = EventTerm(
@@ -242,7 +208,7 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (-5.0, 5.0),
+            "mass_distribution_params": (-1.0, 2.0),
             "operation": "add",
         },
     )
@@ -251,18 +217,21 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.01, 0.01)},
+            "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
         },
     )
     base_external_force_torque = EventTerm(
-        func=mdp.apply_external_force_torque,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "force_range": (0.0, 0.0),
-            "torque_range": (-0.0, 0.0),
-        },
+        func=paper_events.randomize_disturbance, mode="reset",
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="base"),
+                "force_range": (0.0, 0.0)},
     )
+    disturbance = EventTerm(
+        func=paper_events.randomize_disturbance, mode="interval", interval_range_s=(1.0, 1.0),
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="base"),
+                "force_range": (-20.0, 20.0), "probability": 0.2},
+    )
+    motor_strength = EventTerm(func=paper_events.randomize_motor_strength, mode="startup",
+                              params={"factor_range": (0.9, 1.1)})
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
@@ -283,53 +252,32 @@ class EventCfg:
         mode="reset",
         params={"position_range": (0.5, 1.5), "velocity_range": (0.0, 0.0)},
     )
-    push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
-        mode="interval",
-        interval_range_s=(10.0, 15.0),
-        params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
-    )
-
-
 @configclass
 class RewardsCfg:
-    """보상 항목. 로봇별 파일에서 가중치를 오버라이드하거나 항목을 끈다(weight=0/None)."""
+    """DreamWaQ Table I의 함수와 논문 가중치를 정의한다."""
 
-    # 몸통이 기울어도(험지 경사, 보행 중 흔들림) 그 기울임에 오염되지 않도록, body-frame이
-    # 아니라 중력정렬(yaw-frame)/world-frame 기준으로 속도를 측정하는 함수를 쓴다. 기울임이
-    # 0이면 body-frame 버전과 완전히 같은 값을 내는 상위호환이라 4족보행/휴머노이드 공용으로 안전하다.
-    track_lin_vel_xy_exp = RewTerm(
-        func=mdp.track_lin_vel_xy_yaw_frame_exp,
-        weight=1.0,
-        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
-    )
-    track_ang_vel_z_exp = RewTerm(
-        func=mdp.track_ang_vel_z_world_exp,
-        weight=0.5,
-        params={"command_name": "base_velocity", "std": math.sqrt(0.25)},
-    )
+    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=1.0,
+                                  params={"command_name": "base_velocity", "std": 0.5})
+    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_exp, weight=0.5,
+                                 params={"command_name": "base_velocity", "std": 0.5})
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-0.2)
     dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    joint_power = RewTerm(func=paper_rewards.joint_power, weight=-2e-5,
+                         params={"asset_cfg": SceneEntityCfg("robot")})
+    power_distribution = RewTerm(func=paper_rewards.power_distribution, weight=-1e-5,
+                                params={"asset_cfg": SceneEntityCfg("robot")})
+    body_height = RewTerm(func=paper_rewards.body_height, weight=-1.0,
+                         params={"target_height": 0.75, "asset_cfg": SceneEntityCfg("robot"),
+                                 "sensor_cfg": SceneEntityCfg("height_scanner")})
+    feet_clearance = RewTerm(func=paper_rewards.feet_clearance, weight=-0.01,
+                            params={"target_height": 0.08,
+                                    "asset_cfg": SceneEntityCfg("robot", body_names=".*FOOT"),
+                                    "sensor_cfg": SceneEntityCfg("height_scanner")})
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    feet_air_time = RewTerm(
-        func=mdp.feet_air_time,
-        weight=0.125,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*FOOT"),
-            "command_name": "base_velocity",
-            "threshold": 0.5,
-        },
-    )
-    undesired_contacts = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), "threshold": 1.0},
-    )
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=0.0)
+    action_smoothness = RewTerm(func=paper_rewards.action_smoothness, weight=-0.01)
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=0.0)
-
 
 @configclass
 class TerminationsCfg:
@@ -361,6 +309,7 @@ class CurriculumCfg:
 class VelocityEnvCfg(ManagerBasedRLEnvCfg):
     """보행(velocity-tracking) 태스크의 공용 베이스. 로봇별 파일이 이 클래스를 상속한다."""
 
+    dwaq_history_length: int = 5
     scene: MySceneCfg = MySceneCfg(num_envs=4096, env_spacing=2.5)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

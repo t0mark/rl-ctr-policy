@@ -1,148 +1,130 @@
-# Copyright (c) 2026 DreamWaQ Project
-# SPDX-License-Identifier: BSD-3-Clause
-
-"""학습된 dwaq 정책 체크포인트를 불러와 평가한다.
-
---mode pilot: GUI 렌더링으로 실제 걷는 모습을 눈으로 확인한다.
---mode full : GUI 없이(headless) 더 많은 환경으로 평가 지표(추적 오차/낙상률 등)를 집계한다.
---checkpoint는 파일명만 지정하면 data/robot/policy/{robot_id}/{timestamp}/{checkpoint}를 읽는다.
---timestamp를 생략하면 가장 최근 학습 run 폴더를 자동으로 고른다.
-cmd_vel은 항상 전진(lin_vel_x 고정, lin_vel_y/ang_vel_z=0)만 나가도록 고정한다.
-
-    실행 명령어:
-    ./isaaclab.sh -p scripts/02_eval.py --mode pilot --robot_id unitree_g1 --checkpoint model_2850.pt --terrain rough
-    ./isaaclab.sh -p scripts/02_eval.py --mode full --robot_id unitree_g1 --checkpoint model_2850.pt --terrain flat
-"""
-
+"""저장된 정규화와 결정적 context로 DreamWaQ 정책을 평가한다."""
 import argparse
-import glob
+import json
 import logging
-import os
+from pathlib import Path
 import sys
 
 import torch
-import yaml
 from isaaclab.app import AppLauncher
 
-# scripts/02_eval.py -> 루트: dirname 2번.
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _PROJECT_ROOT)
-
-_MODE_NUM_ENVS = {"pilot": 4, "full": 64}
-_EVAL_STEPS_FULL = 1000
-
-# CLI 인자 정의 + Isaac Sim 부팅
-parser = argparse.ArgumentParser(description="dwaq G1 보행 정책 평가.")
-parser.add_argument("--mode", type=str, choices=["pilot", "full"], default="pilot", help="평가 모드.")
-parser.add_argument("--robot_id", type=str, default="unitree_g1", help="평가할 로봇 ID (ROBOT_ENV_CFGS의 키).")
-parser.add_argument(
-    "--checkpoint", type=str, required=True, help="체크포인트 파일명(예: model_2850.pt). 경로는 자동으로 찾는다."
-)
-parser.add_argument(
-    "--timestamp",
-    type=str,
-    default=None,
-    help="체크포인트가 들어있는 학습 run 폴더명(예: 20260911_191154). 생략하면 가장 최근 run을 쓴다.",
-)
-parser.add_argument("--terrain", type=str, choices=["flat", "rough"], default="rough", help="평지/험지 지형 선택.")
-AppLauncher.add_app_launcher_args(parser)
-args_cli = parser.parse_args()
-
-# full: 평가만 하면 되므로 GUI 렌더링이 필요 없다. pilot: GUI로 직접 봐야 하므로 그대로 둔다.
-if args_cli.mode == "full":
-    args_cli.headless = True
-
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
-
-from isaaclab.envs import ManagerBasedRLEnv
-from src.dwaq.runners.on_policy_runner import OnPolicyRunner
-from src.sim.rl.configs import ROBOT_ENV_CFGS
-from src.sim.rl.models.dwaq_wrapper import DwaqVecEnvWrapper
-
-log = logging.getLogger(__name__)
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 
-def _resolve_checkpoint_path(robot_id: str, checkpoint_filename: str, timestamp: str | None) -> str:
-    """data/robot/policy/{robot_id}/{timestamp}/{checkpoint_filename} 경로를 지정한다.
-    """
-    policy_root = os.path.join(_PROJECT_ROOT, "data", "robot", "policy", robot_id)
+def resolve_checkpoint(robot_id, timestamp, filename):
+    """사용자가 지정한 run 또는 해당 파일이 존재하는 최신 run을 찾는다."""
+    root = _PROJECT_ROOT / "data/robot/policy" / robot_id
     if timestamp is not None:
-        run_dir = os.path.join(policy_root, timestamp)
+        path = root / timestamp / filename
     else:
-        run_dirs = sorted(glob.glob(os.path.join(policy_root, "*")))
-        run_dir = run_dirs[-1]
-    return os.path.join(run_dir, checkpoint_filename)
+        candidates = sorted(root.glob(f"*/{filename}"))
+        if not candidates:
+            raise FileNotFoundError(f"{root} 아래에서 {filename}을 찾지 못했습니다.")
+        path = candidates[-1]
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
 
 
 def main():
-    """env를 만들고 dwaq wrapper로 감싼 뒤, 체크포인트를 불러와 전진 명령으로 평가한다."""
-    # 환경 설정
-    cfg = ROBOT_ENV_CFGS[args_cli.robot_id]()
-    cfg.scene.num_envs = _MODE_NUM_ENVS[args_cli.mode]
-    cfg.sim.device = args_cli.device
-    cfg.sim.save_logs_to_file = False
-    cfg.sim.logging_level = "INFO"
+    """고정 명령·seed·지형 조건으로 평가하고 추정 오차와 종료 수를 기록한다."""
+    parser = argparse.ArgumentParser(description="DreamWaQ G1 평가")
+    parser.add_argument("--mode", choices=["pilot", "full"], default="pilot")
+    parser.add_argument("--robot_id", default="unitree_g1")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--timestamp")
+    parser.add_argument("--terrain", choices=["flat", "rough"], default="rough")
+    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--vx", type=float, default=1.0)
+    parser.add_argument("--vy", type=float, default=0.0)
+    parser.add_argument("--yaw_rate", type=float, default=0.0)
+    parser.add_argument("--noise", action="store_true")
+    parser.add_argument("--output", type=Path, help="평가 집계 JSON 출력 경로")
+    AppLauncher.add_app_launcher_args(parser)
+    args = parser.parse_args()
+    if args.mode == "full":
+        args.headless = True
+    launcher = AppLauncher(args)
+    env = None
+    try:
+        from src.sim.rl.dreamwaq_env import DreamWaQEnv
+        from src.sim.rl.configs import ROBOT_ENV_CFGS
+        from src.sim.rl.models.dwaq_wrapper import DwaqVecEnvWrapper
+        from src.dwaq.runners.on_policy_runner import OnPolicyRunner
 
-    # 지형 설정
-    if args_cli.terrain == "flat":
-        cfg.scene.terrain.terrain_type = "plane"
-        cfg.scene.terrain.terrain_generator = None
-        cfg.scene.terrain.visual_material = None
+        logging.basicConfig(level=logging.INFO)
+        path = resolve_checkpoint(args.robot_id, args.timestamp, args.checkpoint)
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        if checkpoint.get("format_version") != OnPolicyRunner.FORMAT_VERSION:
+            raise ValueError("구형 checkpoint는 새 논문 로직으로 평가할 수 없습니다.")
+        cfg = ROBOT_ENV_CFGS[args.robot_id]()
+        cfg.scene.num_envs = 4 if args.mode == "pilot" else 64
+        cfg.seed = args.seed
+        cfg.sim.device = args.device
+        cfg.sim.save_logs_to_file = False
+        cfg.sim.logging_level = "INFO"
+        cfg.observations.policy_current.enable_corruption = args.noise
         cfg.curriculum.terrain_levels = None
-    # rough는 학습 때 쓰던 지형(ROUGH_TERRAINS_CFG) 기본값을 그대로 둔다.
-
-    # 명령: 항상 전진만 나가도록 고정 (좌우/회전 명령 없음, 정지 명령도 없음)
-    cfg.commands.base_velocity.rel_standing_envs = 0.0
-    cfg.commands.base_velocity.ranges.lin_vel_x = (1.0, 1.0)
-    cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
-    cfg.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
-    cfg.commands.base_velocity.ranges.heading = (0.0, 0.0)
-
-    # 환경 생성 + dwaq 계약으로 변환
-    env = ManagerBasedRLEnv(cfg=cfg)
-    wrapped_env = DwaqVecEnvWrapper(env)
-
-    # 체크포인트 로드 (학습 때와 동일한 train_cfg 스키마가 있어야 actor_critic 구조가 맞게 만들어진다)
-    train_cfg_path = os.path.join(_PROJECT_ROOT, "configs", "train_cfg.yaml")
-    with open(train_cfg_path, "r") as f:
-        train_cfg = yaml.safe_load(f)
-
-    checkpoint_path = _resolve_checkpoint_path(args_cli.robot_id, args_cli.checkpoint, args_cli.timestamp)
-    runner = OnPolicyRunner(wrapped_env, train_cfg, log_dir=None, device=args_cli.device)
-    runner.load(checkpoint_path)
-    policy = runner.get_inference_policy(device=args_cli.device)
-
-    log.info(f"mode: {args_cli.mode}, robot_id: {args_cli.robot_id}, terrain: {args_cli.terrain}")
-    log.info(f"checkpoint: {checkpoint_path}")
-
-    # 평가 루프
-    obs, obs_hist = wrapped_env.get_observations()
-    if args_cli.mode == "pilot":
-        with torch.inference_mode():
-            while simulation_app.is_running():
-                actions = policy(obs, obs_hist)
-                obs, _, _, obs_hist, _, _, _ = wrapped_env.step(actions)
-    else:
-        # full: 지표를 집계해서 마지막에 평균을 로그로 남긴다.
-        episode_infos = []
-        with torch.inference_mode():
-            for _ in range(_EVAL_STEPS_FULL):
-                actions = policy(obs, obs_hist)
-                obs, _, _, obs_hist, _, _, infos = wrapped_env.step(actions)
-                if "episode" in infos:
-                    episode_infos.append(infos["episode"])
-
-        log.info(f"집계된 에피소드 종료 이벤트 수: {len(episode_infos)}")
-        if episode_infos:
-            for key in episode_infos[0]:
-                values = [torch.as_tensor(info[key]).float() for info in episode_infos if key in info]
-                mean_value = torch.stack(values).mean().item()
-                log.info(f"{key}: {mean_value:.4f}")
-
-    env.close()
+        if cfg.scene.terrain.terrain_generator is not None:
+            cfg.scene.terrain.terrain_generator.curriculum = False
+        cfg.commands.base_velocity.curriculum_enabled = False
+        cfg.commands.base_velocity.rel_standing_envs = 0.0
+        cfg.commands.base_velocity.ranges.lin_vel_x = (args.vx, args.vx)
+        cfg.commands.base_velocity.ranges.lin_vel_y = (args.vy, args.vy)
+        cfg.commands.base_velocity.ranges.ang_vel_z = (args.yaw_rate, args.yaw_rate)
+        # 평가 외란을 고정하며 별도 강건성 실험과 구분한다.
+        cfg.events.disturbance.params["force_range"] = (0.0, 0.0)
+        if args.terrain == "flat":
+            cfg.scene.terrain.terrain_type = "plane"
+            cfg.scene.terrain.terrain_generator = None
+            cfg.scene.terrain.visual_material = None
+        env = DreamWaQEnv(cfg=cfg)
+        wrapper = DwaqVecEnvWrapper(env)
+        runner = OnPolicyRunner(wrapper, checkpoint["train_cfg"], device=args.device)
+        runner.load(path, load_optimizer=False)
+        policy = runner.get_inference_policy()
+        observation = wrapper.get_observations()
+        squared_error = torch.zeros(3, device=args.device)
+        tracking_error = torch.zeros(3, device=args.device)
+        terminated_count = torch.zeros((), device=args.device)
+        truncated_count = torch.zeros((), device=args.device)
+        step = 0
+        with torch.no_grad():
+            while launcher.app.is_running() and (args.mode == "pilot" or step < args.steps):
+                estimated = runner.model.estimate_velocity(observation["history"])
+                squared_error += (estimated - observation["velocity"]).square().sum(0)
+                command = env.command_manager.get_command("base_velocity")
+                measured = torch.cat((observation["velocity"][:, :2],
+                                      env.scene["robot"].data.root_ang_vel_b[:, 2:3]), -1)
+                tracking_error += (measured-command).abs().sum(0)
+                action = policy(observation["obs"], observation["history"])
+                observation, result = wrapper.step(action)
+                terminated_count += result["terminated"].sum()
+                truncated_count += (result["truncated"] & ~result["terminated"]).sum()
+                step += 1
+        count = max(step * wrapper.num_envs, 1)
+        deaths, timeouts = int(terminated_count.item()), int(truncated_count.item())
+        report = {
+            "checkpoint": str(path), "seed": args.seed, "terrain": args.terrain,
+            "steps": step, "num_envs": wrapper.num_envs, "noise": args.noise,
+            "command": [args.vx, args.vy, args.yaw_rate],
+            "velocity_rmse_mps": (squared_error/count).sqrt().tolist(),
+            "command_mae": (tracking_error/count).tolist(),
+            "terminated_episodes": deaths, "timeout_episodes": timeouts,
+            "termination_fraction_of_completed": deaths/max(deaths+timeouts, 1),
+            "note": "미완료 episode는 종료 비율 분모에서 제외; 전체 보행 성공률과 다름",
+        }
+        logging.info("evaluation=%s", report)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    finally:
+        if env is not None:
+            env.close()
+        launcher.app.close()
 
 
 if __name__ == "__main__":
     main()
-    simulation_app.close()

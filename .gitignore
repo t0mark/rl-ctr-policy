@@ -10,5 +10,4 @@ CLAUDE.md
 
 reference/
 # data/
-*.pt
-events.out.tfevents.*
+data/robot/policy
