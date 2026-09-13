@@ -1,4 +1,4 @@
-"""평균 속도 추적 점수에 따라 속도 명령 범위를 단계적으로 확대한다."""
+"""축별 속도 추적 점수에 따라 해당 축의 명령 범위를 단계적으로 확대한다."""
 import logging
 import torch
 from isaaclab.envs.mdp.commands.velocity_command import UniformVelocityCommand
@@ -10,7 +10,10 @@ log = logging.getLogger(__name__)
 
 
 class CurriculumVelocityCommand(UniformVelocityCommand):
-    """평균 추적 점수가 임계값을 넘으면 선속도·각속도 명령 범위를 일정량 확대한다."""
+    """축별 추적 점수가 임계값을 넘으면 그 축의 명령 범위만 일정량 확대한다.
+
+    선속도 점수는 x·y 범위를, 각속도 점수는 yaw 범위를 담당한다.
+    """
 
     def __init__(self, cfg, env):
         """최대 범위와 초기 저속 범위, 전체 환경의 점수 누적기를 만든다."""
@@ -35,13 +38,13 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
         self._low = torch.minimum(self._limit_high, self._limit_low.clamp_min(-cfg.initial_limit))
         self._high = torch.maximum(self._limit_low, self._limit_high.clamp_max(cfg.initial_limit))
 
-        # 판정 구간의 점수 합과 스텝 수, 마지막 누적 스텝 번호를 보관한다.
-        self._score = torch.zeros((), device=self.device)
+        # 판정 구간의 [선속도, 각속도] 점수 합과 스텝 수, 마지막 누적 스텝 번호를 보관한다.
+        self._score = torch.zeros(2, device=self.device)
         self._steps = 0
         self._last_metrics_step = None
 
-        # 기록용으로 마지막 판정 평균 점수를 보관한다.
-        self._last_score = torch.zeros((), device=self.device)
+        # 기록용으로 마지막 판정 평균 점수를 축별로 보관한다.
+        self._last_score = torch.zeros(2, device=self.device)
 
     def _update_metrics(self):
         """명령 갱신 전에 이번 스텝의 추적 점수를 누적한다."""
@@ -55,13 +58,14 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
             return
         self._last_metrics_step = step
 
-        # 선속도·yaw 각속도 추적 보상식의 평균을 정지·실패 환경까지 포함한 전체 환경 평균으로 누적한다.
+        # 선속도·yaw 각속도 추적 보상식을 각각 정지·실패 환경까지 포함한 전체 환경 평균으로 누적한다.
         if self.cfg.curriculum_enabled:
             velocity = quat_apply_inverse(yaw_quat(self.robot.data.root_quat_w),
                                           self.robot.data.root_lin_vel_w)
             linear = (self.command[:, :2] - velocity[:, :2]).square().sum(-1)
             angular = (self.command[:, 2] - self.robot.data.root_ang_vel_w[:, 2]).square()
-            self._score += (0.5 * (torch.exp(-4 * linear) + torch.exp(-4 * angular))).mean()
+            self._score[0] += torch.exp(-4 * linear).mean()
+            self._score[1] += torch.exp(-4 * angular).mean()
             self._steps += 1
 
         # Isaac Lab 기본 명령 추적 오차 기록을 누적한다.
@@ -76,14 +80,16 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
         if ids.numel() == 0:
             return
 
-        # 최소 평가 구간이 모이면 평균 점수를 임계값과 비교해 모든 축 범위를 증분만큼 넓히고 누적기를 초기화한다.
+        # 최소 평가 구간이 모이면 축별 평균 점수를 임계값과 비교해 통과한 축의 범위만 넓힌다.
         judged = self._steps and self._steps * self._env.step_dt >= self.cfg.minimum_duration_s
         if judged:
             average = self._score / self._steps
-            expanded = average > self.cfg.success_threshold
-            if expanded:
-                self._low = torch.maximum(self._limit_low, self._low - self.cfg.expansion_step)
-                self._high = torch.minimum(self._limit_high, self._high + self.cfg.expansion_step)
+            passed = average > self.cfg.success_threshold
+            expansion = torch.zeros(3, device=self.device)
+            expansion[:2] = self.cfg.expansion_step * passed[0]
+            expansion[2] = self.cfg.expansion_step * passed[1]
+            self._low = torch.maximum(self._limit_low, self._low - expansion)
+            self._high = torch.minimum(self._limit_high, self._high + expansion)
             self._score.zero_()
             self._steps = 0
 
@@ -91,12 +97,13 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
         self.vel_command_b[ids] = self._low + torch.rand(len(ids), 3, device=self.device) * (self._high - self._low)
         self.is_standing_env[ids] = torch.rand(len(ids), device=self.device) < self.cfg.rel_standing_envs
 
-        # 판정 점수를 기록용으로 보관하고 범위를 넓혔으면 판정 점수와 새 범위를 터미널에 기록한다.
+        # 판정 점수를 기록용으로 보관하고 범위를 넓혔으면 축별 점수와 새 범위를 터미널에 기록한다.
         if judged:
             self._last_score.copy_(average)
-            if expanded:
-                log.info("명령 curriculum: 평균=%.4f 범위=%s~%s",
-                         average.item(), self._low.tolist(), self._high.tolist())
+            if expansion.any():
+                log.info("명령 curriculum: 선속도=%.4f 각속도=%.4f 범위=%s~%s",
+                         average[0].item(), average[1].item(),
+                         self._low.tolist(), self._high.tolist())
 
     def curriculum_state(self):
         """체크포인트에 저장할 현재 명령 범위와 최대 범위를 복사한다."""
@@ -104,8 +111,9 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
                 "limit_low": self._limit_low.clone(), "limit_high": self._limit_high.clone()}
 
     def curriculum_metrics(self):
-        """마지막 평균 추적 점수와 축별 현재 명령 범위를 GPU 텐서로 반환한다."""
-        metrics = {"Curriculum/command_score": self._last_score}
+        """마지막 축별 추적 점수와 축별 현재 명령 범위를 GPU 텐서로 반환한다."""
+        metrics = {"Curriculum/linear_score": self._last_score[0],
+                   "Curriculum/angular_score": self._last_score[1]}
         for index, axis in enumerate(("lin_vel_x", "lin_vel_y", "ang_vel_z")):
             metrics[f"Curriculum/{axis}_min"] = self._low[index]
             metrics[f"Curriculum/{axis}_max"] = self._high[index]
@@ -142,7 +150,7 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
 
 @configclass
 class CurriculumVelocityCommandCfg(UniformVelocityCommandCfg):
-    """평균 추적 점수가 0.75를 넘으면 선속도 m/s와 각속도 rad/s 범위를 각각 0.05 확대하는 명령 설정."""
+    """축별 추적 점수가 0.75를 넘을 때 그 축의 명령 범위를 0.05씩 확대하는 명령 설정."""
 
     class_type: type = CurriculumVelocityCommand
     # curriculum 사용 여부
