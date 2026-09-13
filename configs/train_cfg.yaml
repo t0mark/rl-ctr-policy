@@ -19,7 +19,8 @@ algorithm:
   max_grad_norm: 1.0
   velocity_loss_coef: 1.0
   prediction_loss_coef: 1.0
-  beta: 1.0
+  # 복원 손실은 관측 차원 평균이고 KL은 잠재 차원 합이므로, 두 항의 크기를 맞추는 배율이다.
+  beta: 0.02
 
 adaboot:
   enabled: true

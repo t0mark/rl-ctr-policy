@@ -40,8 +40,13 @@ class StrengthPDActuator(IdealPDActuator):
         delay.uniform_(*delay_range_s)
         self._delay_ticks[ids] = (delay / physics_dt).round().long().clamp(0, max_ticks)
 
-        # reset된 환경은 이전 episode의 토크를 이어받지 않는다.
+        # 지연이 바뀐 환경의 큐를 비운다.
         self._torque_queue[:, ids] = 0.0
+
+    def reset(self, env_ids=None):
+        """reset된 환경의 토크 큐를 비운다."""
+        if self._torque_queue is not None:
+            self._torque_queue[:, slice(None) if env_ids is None else env_ids] = 0.0
 
     def compute(self, control_action, joint_pos, joint_vel):
         """계산된 토크를 큐에 넣고 지연된 토크를 실제 출력으로 전달한다."""

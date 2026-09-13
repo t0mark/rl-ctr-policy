@@ -58,25 +58,44 @@ def apply_disturbance(env):
 
 
 class DelayedJointPositionAction(JointPositionAction):
-    """각 episode에서 샘플링한 지연을 physics tick으로 양자화하고, 매 tick 외란도 함께 적용한다."""
+    """환경마다 뽑은 지연을 physics tick으로 양자화하고, 매 tick 외란도 함께 적용한다."""
 
     def __init__(self, cfg, env):
         """최근 목표와 지연 tick을 저장할 GPU 버퍼를 생성한다."""
         super().__init__(cfg, env)
+        if cfg.delay_range_s[0] < 0 or cfg.delay_range_s[1] < cfg.delay_range_s[0]:
+            raise ValueError("action 지연 범위가 잘못되었습니다.")
+        self._target_clipped = torch.zeros_like(self._processed_actions, dtype=torch.bool)
         self._max_ticks = math.ceil(cfg.delay_range_s[1] / env.physics_dt)
         self._physics_dt = env.physics_dt
         self._queue = torch.as_tensor(self._offset, device=self.device).expand_as(
             self._processed_actions).unsqueeze(0).repeat(
             self._max_ticks + 1, 1, 1).clone()
-        self._delay_ticks = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._cursor = 0
         self._env_indices = torch.arange(self.num_envs, device=self.device)
+        # action 지연은 환경마다 한 번만 뽑아 학습 내내 유지한다.
+        delay = torch.empty(self.num_envs, device=self.device).uniform_(*cfg.delay_range_s)
+        self._delay_ticks = (delay / self._physics_dt).round().long().clamp(0, self._max_ticks)
         self.reset()
 
     @property
     def joint_names(self):
         """checkpoint에 기록할 실제 action 관절 순서를 반환한다."""
         return self._joint_names
+
+    @property
+    def target_clipped(self):
+        """요청한 목표가 관절의 하드 제한을 넘었는지 반환한다."""
+        return self._target_clipped
+
+    def process_actions(self, actions):
+        """정책의 원출력은 보존하고 물리 목표만 관절 제한 안으로 제한한다."""
+        super().process_actions(actions)
+        limits = self._asset.data.joint_pos_limits[:, self._joint_ids]
+        bounded = self._processed_actions.clamp(min=limits[..., 0], max=limits[..., 1])
+        self._target_clipped.copy_(bounded != self._processed_actions)
+        if self.cfg.enforce_joint_limits:
+            self._processed_actions.copy_(bounded)
 
     def apply_actions(self):
         """현재 목표를 큐에 넣고 지연된 목표를 physics에 전달한다."""
@@ -91,16 +110,15 @@ class DelayedJointPositionAction(JointPositionAction):
         self._cursor = (self._cursor + 1) % self._queue.shape[0]
 
     def reset(self, env_ids=None):
-        """reset된 환경의 큐를 기본 자세로 채우고 지연을 다시 뽑는다."""
+        """reset된 환경의 목표 큐를 기본 자세로 채운다."""
         super().reset(env_ids)
         if not hasattr(self, "_queue"):
             return
         ids = self._env_indices if env_ids is None else env_ids
         default = self._asset.data.default_joint_pos[ids][:, self._joint_ids]
+        self._target_clipped[ids] = False
         self._queue[:, ids] = default.unsqueeze(0)
         self._processed_actions[ids] = default
-        delay = torch.empty(len(ids), device=self.device).uniform_(*self.cfg.delay_range_s)
-        self._delay_ticks[ids] = (delay / self._physics_dt).round().long().clamp(0, self._max_ticks)
 
 
 @configclass
@@ -109,6 +127,7 @@ class DelayedJointPositionActionCfg(JointPositionActionCfg):
 
     class_type: type = DelayedJointPositionAction
     delay_range_s: tuple[float, float] = (0.0, 0.015)
+    enforce_joint_limits: bool = True
 
 
 def disturbance_body(env):
@@ -120,23 +139,25 @@ def disturbance_body(env):
     return quat_apply_inverse(env.scene[asset_name].data.root_quat_w, force.sum(1))
 
 
-def randomize_motor_strength(env, env_ids, factor_range=(0.9, 1.1)):
+def randomize_motor_strength(env, env_ids, factor_range=(0.9, 1.1), actuator_names=None):
     """gain·토크 한계를 변경하지 않고 actuator의 출력 배율만 샘플링한다."""
     from .actuators import StrengthPDActuator
 
     robot = env.scene["robot"]
-    for actuator in robot.actuators.values():
+    for name in (robot.actuators if actuator_names is None else actuator_names):
+        actuator = robot.actuators[name]
         if not isinstance(actuator, StrengthPDActuator):
             raise TypeError("motor strength에는 StrengthPDActuator가 필요합니다.")
         actuator.randomize_strength(env_ids, factor_range)
 
 
-def randomize_torque_delay(env, env_ids, delay_range_s=(0.0, 0.010)):
+def randomize_torque_delay(env, env_ids, delay_range_s=(0.0, 0.010), actuator_names=None):
     """actuator가 출력하는 토크의 실행 지연을 환경별로 샘플링한다."""
     from .actuators import StrengthPDActuator
 
     robot = env.scene["robot"]
-    for actuator in robot.actuators.values():
+    for name in (robot.actuators if actuator_names is None else actuator_names):
+        actuator = robot.actuators[name]
         if not isinstance(actuator, StrengthPDActuator):
             raise TypeError("토크 지연에는 StrengthPDActuator가 필요합니다.")
         actuator.randomize_torque_delay(env_ids, delay_range_s, env.physics_dt)

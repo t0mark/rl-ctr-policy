@@ -94,7 +94,7 @@ class RolloutStorage:
 
     def normalization_data(self):
         """중복 history 대신 현재 시점 표본으로 통계를 갱신한다."""
-        return tuple(self._data[key].flatten(0, 1) for key in ("obs", "critic", "velocity"))
+        return tuple(self._data[key].flatten(0, 1) for key in ("obs", "critic"))
 
     def clear(self):
         """다음 rollout 수집을 시작한다."""

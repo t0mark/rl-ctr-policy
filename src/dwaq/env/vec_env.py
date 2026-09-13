@@ -46,6 +46,26 @@ class VecEnv(Protocol):
     num_actions: int
     training_phase: int
     device: str
+    step_dt: float
+    max_episode_length: int
+    episode_length_buf: torch.Tensor
+
+    @property
+    def specification(self) -> dict:
+        """정책 입출력과 제어 규격을 반환한다."""
+        ...
+
+    def curriculum_state(self) -> dict | None:
+        """현재 명령 curriculum의 범위를 반환한다."""
+        ...
+
+    def curriculum_metrics(self) -> dict[str, torch.Tensor]:
+        """명령 curriculum의 평균 추적 점수와 현재 범위를 반환한다."""
+        ...
+
+    def load_curriculum_state(self, state: dict | None) -> None:
+        """명령 curriculum을 복원하고 새 episode를 시작한다."""
+        ...
 
     def get_observations(self) -> dict[str, torch.Tensor]:
         """obs·history·critic·velocity 캐시를 반환한다."""

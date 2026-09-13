@@ -115,9 +115,12 @@ def main():
         tracking_error = torch.zeros(3, device=args.device)
         terminated_count = torch.zeros((), device=args.device)
         truncated_count = torch.zeros((), device=args.device)
+        diagnostic_sums = {}
+        episode_steps = torch.zeros(wrapper.num_envs, device=args.device)
+        completed_lengths = []
         step = 0
         with torch.no_grad():
-            while launcher.app.is_running() and (args.mode == "pilot" or step < args.steps):
+            while launcher.app.is_running() and step < args.steps:
                 estimated = runner.model.estimate_velocity(observation["history"])
                 squared_error += (estimated - observation["velocity"]).square().sum(0)
                 command = env.command_manager.get_command("base_velocity")
@@ -126,6 +129,12 @@ def main():
                 tracking_error += (measured-command).abs().sum(0)
                 action = policy(observation["history"])
                 observation, result = wrapper.step(action)
+                episode_steps += 1
+                done = result["terminated"] | result["truncated"]
+                completed_lengths.append(episode_steps[done].clone())
+                episode_steps[done] = 0
+                for key, value in result["diagnostics"].items():
+                    diagnostic_sums[key] = diagnostic_sums.get(key, 0.0) + value
                 terminated_count += result["terminated"].sum()
                 truncated_count += (result["truncated"] & ~result["terminated"]).sum()
                 step += 1
@@ -142,6 +151,11 @@ def main():
             "termination_fraction_of_completed": deaths/max(deaths+timeouts, 1),
             "note": "미완료 episode는 종료 비율 분모에서 제외; 전체 보행 성공률과 다름",
         }
+        lengths = torch.cat(completed_lengths) if completed_lengths else episode_steps[:0]
+        report["mean_completed_episode_s"] = (lengths.mean().item() * env.step_dt) if lengths.numel() else None
+        report["diagnostics"] = {
+            key: (value / (1 if key.startswith("TerminationCount/") else max(step, 1))).item()
+            for key, value in diagnostic_sums.items()}
         logging.info("evaluation=%s", report)
         if args.output is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)

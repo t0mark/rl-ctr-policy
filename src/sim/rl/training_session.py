@@ -42,6 +42,8 @@ class TrainingSession:
         self._env = DreamWaQEnv(cfg=cfg)
         self._wrapper = DwaqVecEnvWrapper(self._env)
         self._runner = OnPolicyRunner(self._wrapper, train_cfg, log_dir, device=device)
+
+        # 구성한 환경의 학습 단계와 관측 규격을 터미널에 기록한다.
         log.info("phase=%d num_envs=%d obs=%d critic=%d actor_history=%d estimator_history=%d",
                  phase, num_envs, self._wrapper.num_obs, self._wrapper.num_privileged_obs,
                  self._wrapper.actor_history_length, self._wrapper.estimator_history_length)
@@ -65,7 +67,9 @@ class TrainingSession:
 
     def learn(self, iterations):
         """현재 단계의 학습을 실행한다."""
+        # 학습 시작 시 학습 단계와 반복 수를 터미널에 기록한다.
         log.info("phase=%d iterations=%d 학습 시작", self._phase, iterations)
+
         self._runner.learn(iterations, init_at_random_ep_len=False)
 
     def close(self):

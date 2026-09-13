@@ -32,7 +32,7 @@ from isaaclab.sim import DomeLightCfg, MdlFileCfg, RigidBodyMaterialCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 
 # Isaac Lab이 기본 제공하는 mdp 항목 함수/커맨드 cfg를 그대로 재사용한다
 # (feet_air_time_positive_biped, joint_deviation_l1, UniformVelocityCommandCfg 등 포함).
@@ -45,10 +45,6 @@ from src.sim.rl.mdp import (
 from src.sim.rl.mdp.gait import GaitCfg
 from src.sim.rl.mdp.velocity_command import CurriculumVelocityCommandCfg
 from src.sim.rl.terrains import PHASE_INITIAL_TERRAIN_LEVELS, PHASE_TERRAINS_CFGS
-
-##
-# Scene definition (로봇 무관 공용)
-##
 
 
 @configclass
@@ -107,7 +103,8 @@ class MySceneCfg(InteractiveSceneCfg):
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
-    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
+    # history_length는 제어 주기 한 번의 물리 스텝 수에 맞춰 __post_init__에서 설정한다.
+    contact_forces = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/.*", track_air_time=True)
 
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -121,12 +118,11 @@ class MySceneCfg(InteractiveSceneCfg):
 ##
 # MDP settings (로봇 무관 공용)
 ##
-
-
 @configclass
 class CommandsCfg:
     """속도 명령 사양."""
 
+    # 10초마다 명령을 재샘플링하고 평균 추적 점수에 따라 명령 범위를 넓히는 curriculum 명령이다.
     base_velocity = CurriculumVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
@@ -146,24 +142,24 @@ class ActionsCfg:
     """액션 사양. joint_names는 로봇별 파일에서 실제 제어 대상 관절로 좁혀서 오버라이드한다."""
 
     joint_pos = paper_events.DelayedJointPositionActionCfg(
-        asset_name="robot", joint_names=[".*"], scale=0.5, use_default_offset=True
+        asset_name="robot", joint_names=[".*"], scale=0.25, use_default_offset=True
     )
 
 
 @configclass
 class ObservationsCfg:
-    """현재 관측·특권 관측·속도 타깃을 분리하고 이력은 wrapper가 관리한다."""
+    """비대칭 actor-critic을 위해 actor 부분 관측·critic 특권 관측·속도 타깃을 분리하고 이력은 wrapper가 관리한다."""
 
     @configclass
     class PolicyCurrentCfg(ObsGroup):
-        """actor가 읽는 현재 시점의 단일 noisy 표본."""
+        """actor 부분 관측으로, 실제 로봇 센서로 얻을 수 있는 현재 시점의 단일 noisy 표본."""
 
         gait_phase = ObsTerm(func=paper_observations.gait_phase)
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
-        base_roll_pitch = ObsTerm(func=paper_observations.base_roll_pitch, noise=Unoise(n_min=-0.06, n_max=0.06))
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(mean=0.0, std=0.2))
+        base_roll_pitch = ObsTerm(func=paper_observations.base_roll_pitch, noise=Gnoise(mean=0.0, std=0.06))
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.05, n_max=0.05))
-        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Gnoise(mean=0.0, std=0.05))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(mean=0.0, std=1.5))
         actions = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
@@ -173,15 +169,16 @@ class ObservationsCfg:
 
     @configclass
     class CriticCfg(PolicyCurrentCfg):
-        """속도·주변 및 발 지형을 추가한 무잡음 특권 관측."""
+        """critic 전용 특권 관측으로, actor 관측에 속도·주변 및 발 지형을 추가한 무잡음 값."""
 
+        # 실제 로봇 센서로 직접 얻을 수 없어 critic에만 제공하는 특권 항목이다.
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         height_scan = ObsTerm(func=mdp.height_scan,
-                             params={"sensor_cfg": SceneEntityCfg("height_scanner")}, clip=(-1.0, 1.0))
+                              params={"sensor_cfg": SceneEntityCfg("height_scanner")}, clip=(-1.0, 1.0))
         left_foot_height_scan = ObsTerm(func=paper_observations.foot_height_scan,
-                                       params={"sensor_cfg": SceneEntityCfg("left_foot_scanner")}, clip=(-1.0, 1.0))
+                                        params={"sensor_cfg": SceneEntityCfg("left_foot_scanner")}, clip=(-1.0, 1.0))
         right_foot_height_scan = ObsTerm(func=paper_observations.foot_height_scan,
-                                        params={"sensor_cfg": SceneEntityCfg("right_foot_scanner")}, clip=(-1.0, 1.0))
+                                         params={"sensor_cfg": SceneEntityCfg("right_foot_scanner")}, clip=(-1.0, 1.0))
 
         def __post_init__(self):
             """critic에는 센서 노이즈를 적용하지 않는다."""
@@ -190,22 +187,23 @@ class ObservationsCfg:
 
     @configclass
     class VelocityTargetCfg(ObsGroup):
-        """critic 배열 위치와 무관한 현재 body 속도 정답."""
+        """추정기 속도 손실의 정답으로 쓰는 현재 몸체 좌표계 선속도."""
 
         velocity = ObsTerm(func=mdp.base_lin_vel)
 
         def __post_init__(self):
-            """물리 단위의 속도 벡터를 반환한다."""
+            """노이즈 없는 m/s 단위 속도 벡터를 반환한다."""
             self.enable_corruption = False
             self.concatenate_terms = True
 
+    # actor는 policy_current 이력만, critic은 critic 이력만 입력받는다.
     policy_current: PolicyCurrentCfg = PolicyCurrentCfg()
     critic: CriticCfg = CriticCfg()
     velocity_target: VelocityTargetCfg = VelocityTargetCfg()
 
 @configclass
 class EventCfg:
-    """도메인 랜덤화 이벤트."""
+    """도메인 랜덤화 이벤트. 기체 특성은 환경마다 한 번 뽑아 고정하고, 외란만 매 제어 주기 갱신한다."""
 
     # PD 게인 랜덤화는 환경 초기화 시 한 번 적용한다.
     randomize_actuator_gains = EventTerm(
@@ -271,7 +269,7 @@ class EventCfg:
     )
     motor_strength = EventTerm(func=paper_events.randomize_motor_strength, mode="startup",
                               params={"factor_range": (0.8, 1.2)})
-    torque_delay = EventTerm(func=paper_events.randomize_torque_delay, mode="reset",
+    torque_delay = EventTerm(func=paper_events.randomize_torque_delay, mode="startup",
                             params={"delay_range_s": (0.0, 0.010)})
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -295,34 +293,34 @@ class EventCfg:
     )
 @configclass
 class RewardsCfg:
-    """Two-Phase 보상 수식과 계측으로 산정한 공통 가중치를 정의한다."""
+    """Two-Phase Table 4를 기준으로 보상 가중치와 명시적인 자세 오차 벌점을 정의한다."""
 
-    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=1.27,
+    # 명령과 실제 속도를 중력 정렬 yaw 좌표계에서 비교해 몸통 기울기의 영향을 배제한다.
+    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=2.4,
                                   params={"command_name": "base_velocity", "std": 0.5})
-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_exp, weight=2.59,
+    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.1,
                                  params={"command_name": "base_velocity", "std": 0.5})
-    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.186)
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-17.6)
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.51e-6)
-    joint_power = RewTerm(func=paper_rewards.joint_power, weight=-1.59e-4,
+    # 수평 중력 성분은 자세 오차이므로 음의 가중치로 기울어짐을 억제한다.
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
+    # 관절 가속도와 관절 파워는 DreamWaQ Table I의 수식과 가중치를 사용한다.
+    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    joint_power = RewTerm(func=paper_rewards.joint_power, weight=-2.0e-5,
                          params={"asset_cfg": SceneEntityCfg("robot")})
-    velocity_mismatch = RewTerm(func=paper_rewards.velocity_mismatch, weight=3.49,
+    velocity_mismatch = RewTerm(func=paper_rewards.velocity_mismatch, weight=0.5,
                                 params={"asset_cfg": SceneEntityCfg("robot")})
-    # 편차 주입에 반대 방향으로 반응해 민감도를 얻지 못했다.
-    # 정상 동작 기여를 양의 보상 합의 2% 이내로 제한하는 크기다.
-    default_joint_tracking = RewTerm(func=paper_rewards.default_joint_tracking, weight=0.590,
+    # 기본 자세 추종은 지수 보상이며 기준 동작 추종보다 작은 가중치를 쓴다.
+    default_joint_tracking = RewTerm(func=paper_rewards.default_joint_tracking, weight=0.5,
                                     params={"asset_cfg": SceneEntityCfg("robot")})
-    body_height = RewTerm(func=paper_rewards.body_height, weight=-98.2,
+    body_height = RewTerm(func=paper_rewards.body_height, weight=-1.0,
                          params={"target_height": 0.75, "asset_cfg": SceneEntityCfg("robot"),
                                  "sensor_cfg": SceneEntityCfg("height_scanner")})
-    feet_clearance = RewTerm(func=paper_rewards.feet_clearance, weight=-17.0,
-                            params={"target_height": 0.08,
+    feet_clearance = RewTerm(func=paper_rewards.feet_clearance, weight=-0.01,
+                            params={"target_height": 0.08, "sole_offset": 0.0,
                                     "asset_cfg": SceneEntityCfg("robot", body_names=".*FOOT"),
-                                    "sensor_cfg": SceneEntityCfg("height_scanner")})
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.257)
-    action_smoothness = RewTerm(func=paper_rewards.action_smoothness, weight=-0.0861)
-    dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=0.0)
+                                    "left_sensor_cfg": SceneEntityCfg("left_foot_scanner"),
+                                    "right_sensor_cfg": SceneEntityCfg("right_foot_scanner")})
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    action_smoothness = RewTerm(func=paper_rewards.action_smoothness, weight=-0.01)
 
 @configclass
 class TerminationsCfg:
@@ -348,8 +346,6 @@ class CurriculumCfg:
 ##
 # Environment configuration (로봇 무관 공용 베이스)
 ##
-
-
 @configclass
 class VelocityEnvCfg(ManagerBasedRLEnvCfg):
     """보행(velocity-tracking) 태스크의 공용 베이스. 로봇별 파일이 이 클래스를 상속한다."""
@@ -370,9 +366,10 @@ class VelocityEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         """일반 시뮬레이션 설정과 센서 업데이트 주기를 정리한다."""
-        self.decimation = 4
-        self.episode_length_s = 20.0
-        self.sim.dt = 0.005
+        # 정책은 100 Hz, PD 제어기는 1000 Hz로 동작한다.
+        self.decimation = 10
+        self.episode_length_s = 30.0
+        self.sim.dt = 0.001
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
@@ -383,6 +380,7 @@ class VelocityEnvCfg(ManagerBasedRLEnvCfg):
                 scanner.update_period = self.decimation * self.sim.dt
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
+            self.scene.contact_forces.history_length = self.decimation
 
         # 외란은 action이 출력될 때마다 갱신되어야 하므로 제어 주기와 항상 같게 둔다.
         control_period = self.decimation * self.sim.dt
@@ -406,12 +404,21 @@ def configure_training_phase(cfg, phase):
     if phase not in PHASE_TERRAINS_CFGS:
         raise ValueError(f"지원하지 않는 학습 단계: {phase}")
 
-    # 단계별 지형 설정은 전역 객체를 공유하지 않도록 복사해서 연결한다.
+    # 단계별 지형 생성기의 복사본을 연결하고 지형 curriculum과 초기 난이도 상한을 설정한다.
     generator = copy.deepcopy(PHASE_TERRAINS_CFGS[phase])
     generator.curriculum = getattr(cfg.curriculum, "terrain_levels", None) is not None
     cfg.scene.terrain.terrain_generator = generator
     cfg.scene.terrain.max_init_terrain_level = PHASE_INITIAL_TERRAIN_LEVELS[phase]
-    if phase == 2:
-        cfg.rewards.joint_position_tracking = None
+
+    # 기준 동작 추종 보상 설정을 별도로 보관한다.
+    reference = cfg.rewards.joint_position_tracking
+    if reference is not None:
+        cfg._phase1_reference_reward = copy.deepcopy(reference)
+    if not hasattr(cfg, "_phase1_reference_reward"):
+        raise ValueError("1단계 기준 동작 보상 설정이 없습니다.")
+
+    # 1단계는 기준 동작 추종 보상을 켜고, 2단계는 None으로 두어 보상 계산에서 제외한다.
+    cfg.rewards.joint_position_tracking = (
+        copy.deepcopy(cfg._phase1_reference_reward) if phase == 1 else None)
     cfg.training_phase = phase
     return cfg

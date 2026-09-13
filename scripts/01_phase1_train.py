@@ -52,7 +52,7 @@ def main():
             device=args.device, num_envs=resolve_num_envs(args.mode, args.num_envs),
             log_dir=run_dir, seed=args.seed)
 
-        # 같은 단계의 재개만 허용한다. 2단계 전환은 02_phase2_train.py가 담당한다.
+        # checkpoint가 지정되면 중단된 1단계 학습 상태를 이어간다.
         if args.resume is not None:
             session.runner.load(args.resume, mode="resume")
         (run_dir / "train_cfg.yaml").write_text(yaml.safe_dump(train_cfg, allow_unicode=True))

@@ -3,6 +3,10 @@ import torch
 from isaaclab.envs import ManagerBasedRLEnv
 
 from src.sim.rl.mdp.gait import GaitPhase
+from src.sim.rl.utils.rollout_diagnostics import RolloutDiagnostics
+
+# action 2차 차분에 필요한 과거 action 개수.
+ACTION_HISTORY_LENGTH = 2
 
 
 class DreamWaQEnv(ManagerBasedRLEnv):
@@ -18,7 +22,10 @@ class DreamWaQEnv(ManagerBasedRLEnv):
         self._terminal_critic = torch.zeros(self.num_envs, critic_dim, device=self.device)
         self._terminal_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._previous_previous_action = torch.zeros_like(self.action_manager.action)
-        self._action_history_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._action_history_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        # 학습 기록용 보행 진단값 수집기를 만든다.
+        self._diagnostics = RolloutDiagnostics(self)
 
     @property
     def gait(self):
@@ -38,11 +45,16 @@ class DreamWaQEnv(ManagerBasedRLEnv):
 
     @property
     def action_history_valid(self):
-        """reset 후 첫 action에서 2차 차분을 제외하는 mask를 반환한다."""
-        return self._action_history_valid
+        """2차 차분에 필요한 과거 action이 모두 쌓인 환경만 True인 mask를 반환한다."""
+        return self._action_history_steps >= ACTION_HISTORY_LENGTH
 
     def step(self, action):
         """종료 관측과 2차 action 차분용 상태를 갱신한다."""
+        # Isaac Lab step 전에 manager 로그를 비우고 물리 진행 동안 유효한 명령을 진단용으로 복사한다.
+        self.extras["log"] = {}
+        self._diagnostics.begin_step()
+
+        # terminal critic mask를 비우고 a_(t-2)를 보관한 뒤 Isaac Lab step을 실행한다.
         self._terminal_valid.zero_()
         self._previous_previous_action.copy_(self.action_manager.prev_action)
         self._capture_terminal = True
@@ -50,21 +62,35 @@ class DreamWaQEnv(ManagerBasedRLEnv):
             obs, reward, terminated, truncated, extras = super().step(action)
         finally:
             self._capture_terminal = False
-        self._action_history_valid.copy_(~(terminated | truncated))
+        # 과거 action이 쌓인 스텝 수를 세고 종료된 환경은 다시 0부터 센다.
+        self._action_history_steps += 1
+        self._action_history_steps[terminated | truncated] = 0
         extras["terminal_critic"] = self._terminal_critic
         extras["terminal_valid"] = self._terminal_valid
+
+        # 종료되지 않은 환경의 진단값을 계측하고 스텝 평균 진단 지표를 함께 전달한다.
+        self._diagnostics.capture(~(terminated | truncated))
+        extras["diagnostics"] = self._diagnostics.metrics()
+
         return obs, reward, terminated, truncated, extras
 
     def _reset_idx(self, env_ids):
         """manager와 로봇이 reset되기 전에 terminal critic을 복사한다."""
         if self._capture_terminal:
+            # 어느 환경도 reset되기 전에 명령 curriculum의 이번 스텝 추적 점수를 누적한다.
+            self.command_manager.get_term("base_velocity").capture_step_metrics()
+
+            # reset 직전 critic 관측을 terminal critic으로 보관한다.
             critic = self.observation_manager.compute_group("critic", update_history=False)
             self._terminal_critic[env_ids] = critic[env_ids]
             self._terminal_valid[env_ids] = True
+
+            # reset 직전 상태로 종료 환경의 진단값을 계측한다.
+            self._diagnostics.capture(env_ids)
         super()._reset_idx(env_ids)
         # reset된 환경의 위상이 0으로 돌아간 뒤 관측이 계산되도록 캐시를 버린다.
         if self._gait is not None:
             self._gait.invalidate()
-        if hasattr(self, "_action_history_valid"):
-            self._action_history_valid[env_ids] = False
+        if hasattr(self, "_action_history_steps"):
+            self._action_history_steps[env_ids] = 0
             self._previous_previous_action[env_ids] = 0

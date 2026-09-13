@@ -11,7 +11,7 @@
 import isaaclab.terrains as terrain_gen
 from isaaclab.terrains import TerrainGeneratorCfg
 
-# 두 단계가 공유하는 지형 격자 규격. 난이도만 단계별로 달라진다.
+# 두 단계가 공유하는 지형 격자 규격이다.
 _TERRAIN_SIZE = (8.0, 8.0)
 _BORDER_WIDTH = 20.0
 _NUM_ROWS = 10
@@ -20,7 +20,7 @@ _HORIZONTAL_SCALE = 0.1
 _VERTICAL_SCALE = 0.005
 _SLOPE_THRESHOLD = 0.75
 
-# 1단계: 기준 보행 습득용. 계단 비중 20%에 최대 높이 0.05 m로 제한한다.
+# 1단계 지형: 평지·불규칙 지면·완만한 경사 위주로 구성하고 계단은 비중 20%, 최대 높이 0.05 m로 둔다.
 PHASE1_TERRAINS_CFG = TerrainGeneratorCfg(
     size=_TERRAIN_SIZE,
     border_width=_BORDER_WIDTH,
@@ -52,7 +52,7 @@ PHASE1_TERRAINS_CFG = TerrainGeneratorCfg(
     },
 )
 
-# 2단계: 적응 보행 학습용. 계단·스텝 비중 50%에 최대 높이 0.16 m, 경사는 약 20도까지 올린다.
+# 2단계 지형: 계단·스텝 비중 50%에 최대 높이 0.16 m, 경사는 약 20도까지 올린다.
 PHASE2_TERRAINS_CFG = TerrainGeneratorCfg(
     size=_TERRAIN_SIZE,
     border_width=_BORDER_WIDTH,

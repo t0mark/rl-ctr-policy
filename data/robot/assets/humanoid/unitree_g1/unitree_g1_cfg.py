@@ -1,11 +1,10 @@
 # Copyright (c) 2026 DreamWaQ Project
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Unitree G1(29 DOF, 손가락 없는 unitree_g1.urdf 기준) Isaac Lab ArticulationCfg.
+"""Unitree G1(다리 12 + 허리 3 = 15 DOF) Isaac Lab ArticulationCfg.
 
 data/robot/assets/humanoid/unitree_g1/usd/unitree_g1.usd를 스폰한다.
-변환 시 fixed 관절 8개 가 부모 바디로 병합되어, 실제 바디 수는 30개다.
-fixed 관절: imu_in_pelvis, d435_link, head_link, imu_in_torso, logo_link, mid360_link, left/right_rubber_hand
+팔 14관절은 USD에서 fixed 관절이므로 자유도에 포함되지 않는다.
 """
 
 import os
@@ -66,76 +65,50 @@ UNITREE_G1_CFG = ArticulationCfg(
             "waist_yaw_joint": 0.0,
             "waist_roll_joint": 0.0,
             "waist_pitch_joint": 0.0,
-            # 팔 (RL 비제어, 기본자세로 PD 고정)
-            "left_shoulder_pitch_joint": 0.0,
-            "left_shoulder_roll_joint": 0.0,
-            "left_shoulder_yaw_joint": 0.0,
-            "left_elbow_joint": 0.0,
-            "left_wrist_roll_joint": 0.0,
-            "left_wrist_pitch_joint": 0.0,
-            "left_wrist_yaw_joint": 0.0,
-            "right_shoulder_pitch_joint": 0.0,
-            "right_shoulder_roll_joint": 0.0,
-            "right_shoulder_yaw_joint": 0.0,
-            "right_elbow_joint": 0.0,
-            "right_wrist_roll_joint": 0.0,
-            "right_wrist_pitch_joint": 0.0,
-            "right_wrist_yaw_joint": 0.0,
         },
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        # 감쇠는 사인 스윕으로 식별한 등가 관성에서 목표 감쇠비 0.7을 내는 값이다.
-        # 대역폭(고유진동수 4~10 Hz)은 이미 제어 주기 대비 충분하므로 stiffness는 유지한다.
+        # 게인과 토크 한계는 Unitree 공식 G1 설정(unitree_rl_gym, g1_29dof.urdf)을 따른다.
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*_hip_yaw_joint", ".*_hip_roll_joint", ".*_hip_pitch_joint", ".*_knee_joint"],
-            effort_limit_sim=None,  # USD(URDF 유래)에 있는 관절별 실제 토크 한계를 그대로 사용
+            effort_limit={
+                ".*_hip_yaw_joint": 88.0,
+                ".*_hip_roll_joint": 88.0,
+                ".*_hip_pitch_joint": 88.0,
+                ".*_knee_joint": 139.0,
+            },
             velocity_limit_sim=None,
             stiffness={
                 ".*_hip_yaw_joint": 100.0,
                 ".*_hip_roll_joint": 100.0,
                 ".*_hip_pitch_joint": 100.0,
-                ".*_knee_joint": 200.0,
+                ".*_knee_joint": 150.0,
             },
             damping={
-                ".*_hip_yaw_joint": 2.6,
-                ".*_hip_roll_joint": 5.5,
-                ".*_hip_pitch_joint": 4.3,
-                ".*_knee_joint": 4.5,
+                ".*_hip_yaw_joint": 2.0,
+                ".*_hip_roll_joint": 2.0,
+                ".*_hip_pitch_joint": 2.0,
+                ".*_knee_joint": 4.0,
             },
             armature=0.03,
         ),
-        # 발목은 감쇠비가 0.12/0.05로 사실상 무감쇠였다. 접촉 안정성을 위해 1.0으로 맞춘다.
         "feet": ImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            effort_limit_sim=None,
+            effort_limit={".*_ankle_pitch_joint": 35.0, ".*_ankle_roll_joint": 35.0},
             velocity_limit_sim=None,
-            stiffness={".*_ankle_pitch_joint": 20.0, ".*_ankle_roll_joint": 20.0},
-            damping={".*_ankle_pitch_joint": 1.65, ".*_ankle_roll_joint": 1.6},
+            stiffness={".*_ankle_pitch_joint": 40.0, ".*_ankle_roll_joint": 40.0},
+            damping={".*_ankle_pitch_joint": 2.0, ".*_ankle_roll_joint": 2.0},
             armature=0.03,
         ),
-        # 게인은 공식 Isaac Lab G1 예제(isaaclab_assets.G1_CFG)의 torso_joint 값을 유지한다.
+        # 허리는 상체 자세를 유지하면서 실기 토크 한계 안에서 움직이는 게인을 쓴다.
         "waist": ImplicitActuatorCfg(
             joint_names_expr=["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"],
-            effort_limit_sim=None,
+            effort_limit={"waist_yaw_joint": 88.0, "waist_roll_joint": 35.0, "waist_pitch_joint": 35.0},
             velocity_limit_sim=None,
-            stiffness=200.0,
-            damping=5.0,
-            armature=0.01,
-        ),
-        "arms": ImplicitActuatorCfg(
-            joint_names_expr=[
-                ".*_shoulder_pitch_joint",
-                ".*_shoulder_roll_joint",
-                ".*_shoulder_yaw_joint",
-                ".*_elbow_joint",
-                ".*_wrist_.*_joint",
-            ],
-            effort_limit_sim=None,
-            velocity_limit_sim=None,
-            stiffness=3000.0,
-            damping=10.0,
+            stiffness=300.0,
+            damping=3.0,
             armature=0.001,
         ),
     },

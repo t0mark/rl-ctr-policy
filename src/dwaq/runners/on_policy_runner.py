@@ -38,6 +38,7 @@ from pathlib import Path
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from ..env import VecEnv
 from ..modules.actor_critic_DWAQ import ActorCritic_DWAQ
 from ..algorithms.ppo import PPO
 from ..algorithms.adaboot import AdaBoot
@@ -45,24 +46,36 @@ from ..storage.rollout_storage import RolloutStorage
 
 log = logging.getLogger(__name__)
 
-# 이전 버전(rsl_rl 스타일) 배너 로그의 폭·라벨 정렬 칸수를 그대로 재사용한다.
-_LOG_WIDTH = 80
-_LOG_PAD = 35
 
 
 def _format_iteration_log(iteration, total_iterations, metrics, eta_seconds):
-    """구분선·중앙정렬 제목·우측정렬 라벨의 이전 배너 양식으로 iteration 로그를 만든다."""
+    """콘솔에는 보행 성능과 최적화 상태를 요약하고 상세 항목은 TensorBoard에 남긴다."""
+    fields = (
+        ("episode_return", "Return"),
+        ("Episodes/mean_length_s", "Episode s"),
+        ("Episodes/timeout_fraction", "Timeout fraction"),
+        ("Tracking/linear_error_mps", "Velocity error m/s"),
+        ("Tracking/yaw_error_radps", "Yaw error rad/s"),
+        ("Control/requested_target_clipped_fraction", "Target clip fraction"),
+        ("value", "Value loss"),
+        ("policy_kl", "KL"),
+        ("learning_rate", "LR"),
+    )
     title = f" Learning iteration {iteration}/{total_iterations} "
-    lines = ["#" * _LOG_WIDTH, title.center(_LOG_WIDTH, " "), ""]
-    lines += [f"{key + ':':>{_LOG_PAD}} {value:.6g}" for key, value in metrics.items()]
-    lines += ["-" * _LOG_WIDTH, f"{'ETA:':>{_LOG_PAD}} {eta_seconds:.1f}s"]
+    lines = ["#" * 80, title.center(80), ""]
+    lines.extend(f"{label + ':':>35} {metrics[key]:.6g}" for key, label in fields if key in metrics)
+    lines.extend(["-" * 80, f"{'ETA:':>35} {eta_seconds:.1f}s"])
     return "\n".join(lines)
 
 
-class OnPolicyRunner:
-    """시점·정규화·AdaBoot 조건을 보존하는 학습 루프."""
 
-    def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
+class OnPolicyRunner:
+    """시점·정규화·AdaBoot 조건을 보존하는 학습 루프.
+
+    teacher-student 없이 actor·critic·추정기를 하나의 학습 루프에서 함께 학습한다.
+    """
+
+    def __init__(self, env: VecEnv, train_cfg, log_dir=None, device="cpu"):
         """환경 계약으로 모델을 구성하고 설정을 보존한다."""
         self._env = env
         self._cfg = copy.deepcopy(train_cfg)
@@ -72,6 +85,7 @@ class OnPolicyRunner:
         runner_cfg = self._cfg["runner"]
         if runner_cfg["policy_class_name"] != "ActorCritic_DWAQ" or runner_cfg["algorithm_class_name"] != "PPO":
             raise ValueError("이 runner는 DreamWaQ/PPO 전용입니다.")
+        # 정책·가치·추정기를 하나의 모델로 구성하고 PPO 하나로 동시에 최적화한다.
         self._model = ActorCritic_DWAQ(
             env.num_obs, env.num_privileged_obs, env.num_actions,
             env.actor_history_length, env.estimator_history_length,
@@ -89,6 +103,10 @@ class OnPolicyRunner:
         self._iteration = 0
         self._normalization_initialized = False
 
+        # 학습 기록용 진행 중 episode의 return과 길이를 환경별로 누적한다.
+        self._episode_return = torch.zeros(env.num_envs, device=self._device)
+        self._episode_steps = torch.zeros(env.num_envs, device=self._device)
+
     @property
     def phase(self):
         """현재 학습 단계 번호를 반환한다."""
@@ -101,29 +119,45 @@ class OnPolicyRunner:
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         """rollout와 PPO update 동안 정규화 통계·AdaBoot 확률을 고정한다."""
+        # 현재 관측을 받고 필요하면 episode 길이를 무작위로 초기화한다.
         observation = self._env.get_observations()
         if init_at_random_ep_len:
             self._env.episode_length_buf.copy_(torch.randint_like(
                 self._env.episode_length_buf, high=self._env.max_episode_length))
+
+        # 첫 학습이면 초기 관측으로 정규화 통계를 만들고 모델을 학습 모드로 둔다.
         if not self._normalization_initialized:
-            self._model.update_normalizers(observation["obs"], observation["critic"], observation["velocity"])
+            self._model.update_normalizers(observation["obs"], observation["critic"])
             self._normalization_initialized = True
-        episode_return = torch.zeros(self._env.num_envs, device=self._device)
-        writer = SummaryWriter(str(self._log_dir)) if self._log_dir is not None else None
         self._model.train()
+
+        # 학습 루프 전에 TensorBoard writer, 남은 시간 계산 기준, rollout 통계 누적기를 준비한다.
+        writer = SummaryWriter(str(self._log_dir)) if self._log_dir is not None else None
         total_iterations = self._iteration + num_learning_iterations
         learn_start_time = time.time()
+        completed_returns = []
+        completed_lengths = []
+        diagnostics = {}
+        manager_logs = {}
+        manager_samples = torch.zeros((), device=self._device)
+        deaths = torch.zeros((), device=self._device)
+        timeouts = torch.zeros((), device=self._device)
+        velocity_error = torch.zeros((), device=self._device)
+
         try:
             for local_iteration in range(num_learning_iterations):
+                # iteration마다 AdaBoot 확률을 한 번 계산해 rollout 동안 고정한다.
                 probability = self._adaboot.probability()
-                completed_returns = []
-                velocity_error = torch.zeros((), device=self._device)
+
                 with torch.no_grad():
                     for _ in range(self._steps):
+                        # 환경별로 AdaBoot 확률에 따라 추정 속도와 실제 속도 중 정책 입력을 고른다.
                         use_estimate = torch.rand(self._env.num_envs, device=self._device) < probability
+                        # actor는 부분 관측 이력으로 행동을 샘플링한다.
                         policy = self._model.distribution(observation["history"],
                                                           observation["velocity"], use_estimate)
                         actions = policy.sample()
+                        # critic 가치는 특권 관측으로만 계산해 전이에 함께 저장한다.
                         transition = {
                             "obs": observation["obs"], "critic": observation["critic"],
                             "history": observation["history"], "velocity": observation["velocity"],
@@ -132,8 +166,8 @@ class OnPolicyRunner:
                             "log_prob": policy.log_prob(actions).sum(-1),
                             "values": self._model.evaluate(observation["critic"]),
                         }
-                        velocity_error += (self._model.estimate_velocity(observation["history"])
-                                           - observation["velocity"]).square().mean()
+
+                        # 환경을 한 스텝 진행하고 timeout은 terminal critic으로 다음 가치를 계산해 전이를 저장한다.
                         observation, result = self._env.step(actions)
                         done = result["terminated"] | result["truncated"]
                         timeout = result["truncated"] & ~result["terminated"]
@@ -145,20 +179,64 @@ class OnPolicyRunner:
                             "rewards", "terminated", "truncated", "prediction_valid", "next_obs")})
                         transition["next_values"] = self._model.evaluate(next_critic)
                         self._storage.add(transition)
-                        episode_return += result["rewards"]
-                        self._adaboot.update(episode_return, done)
-                        completed_returns.append(episode_return[done].clone())
-                        episode_return[done] = 0
+                        # AdaBoot에 스텝 보상과 종료 여부를 전달해 환경별 episode return을 갱신한다.
+                        self._adaboot.update(result["rewards"], done)
+
+                        # 행동 전 관측의 추정 속도 오차, 완료 episode 길이·return, 종료 사유, 진단값, manager 로그를 누적한다.
+                        velocity_error += (self._model.estimate_velocity(transition["history"])
+                                           - transition["velocity"]).square().mean()
+                        self._episode_steps += 1
+                        completed_lengths.append(self._episode_steps[done].clone())
+                        self._episode_steps[done] = 0
+                        self._episode_return += result["rewards"]
+                        completed_returns.append(self._episode_return[done].clone())
+                        self._episode_return[done] = 0
+                        deaths += result["terminated"].sum()
+                        timeouts += timeout.sum()
+                        for key, value in result.get("diagnostics", {}).items():
+                            diagnostics[key] = diagnostics.get(key, 0.0) + value.detach()
+                        count = done.sum()
+                        if result.get("log"):
+                            manager_samples += count
+                            for key, value in result["log"].items():
+                                value = torch.as_tensor(value, device=self._device).float().mean()
+                                manager_logs[key] = manager_logs.get(key, 0.0) + value * count
+
+                # 수집한 rollout 하나로 actor·critic·추정기를 teacher 없이 한 번에 갱신한다.
                 self._storage.compute_returns(self._algorithm.gamma, self._algorithm.lam)
                 metrics = self._algorithm.update(self._storage)
-                metrics["adaboot_probability"] = probability.item()
-                metrics["velocity_rmse_mps"] = (velocity_error / self._steps).sqrt().item()
-                completed = torch.cat(completed_returns)
-                if completed.numel():
-                    metrics["episode_return"] = completed.mean().item()
+
+                # 사용한 rollout으로 정규화 통계를 갱신하고 다음 rollout을 준비한다.
                 self._model.update_normalizers(*self._storage.normalization_data())
                 self._storage.clear()
                 self._iteration += 1
+
+                # 저장 주기마다 체크포인트를 저장한다.
+                if self._log_dir is not None and self._iteration % self._save_interval == 0:
+                    self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
+
+                # rollout 통계·curriculum 지표를 학습 지표에 합쳐 TensorBoard와 터미널에 기록하고 누적기를 비운다.
+                for key, value in diagnostics.items():
+                    divisor = 1 if key.startswith("TerminationCount/") else self._steps
+                    metrics[key] = (value / divisor).item()
+                for key, value in manager_logs.items():
+                    metrics["Manager/" + key] = (value / manager_samples.clamp_min(1)).item()
+                lengths = torch.cat(completed_lengths)
+                metrics["Episodes/completed"] = lengths.numel()
+                metrics["Episodes/terminated"] = deaths.item()
+                metrics["Episodes/timeouts"] = timeouts.item()
+                if lengths.numel():
+                    metrics["Episodes/mean_length_s"] = (lengths.mean() * self._env.step_dt).item()
+                    metrics["Episodes/timeout_fraction"] = (timeouts / lengths.numel()).item()
+                completed = torch.cat(completed_returns)
+                if completed.numel():
+                    metrics["episode_return"] = completed.mean().item()
+                metrics["adaboot_probability"] = probability.item()
+                metrics["velocity_rmse_mps"] = (velocity_error / self._steps).sqrt().item()
+                curriculum = self._env.curriculum_metrics()
+                if curriculum:
+                    values = torch.stack(list(curriculum.values())).tolist()
+                    metrics.update(zip(curriculum.keys(), values))
                 for key, value in metrics.items():
                     if writer is not None:
                         writer.add_scalar(key, value, self._iteration)
@@ -166,11 +244,20 @@ class OnPolicyRunner:
                 remaining = num_learning_iterations - (local_iteration + 1)
                 eta_seconds = elapsed / (local_iteration + 1) * remaining
                 log.info(_format_iteration_log(self._iteration, total_iterations, metrics, eta_seconds))
-                if self._log_dir is not None and self._iteration % self._save_interval == 0:
-                    self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
+                completed_returns.clear()
+                completed_lengths.clear()
+                diagnostics.clear()
+                manager_logs.clear()
+                manager_samples.zero_()
+                deaths.zero_()
+                timeouts.zero_()
+                velocity_error.zero_()
+
+            # 학습이 끝나면 마지막 체크포인트를 저장한다.
             if self._log_dir is not None:
                 self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
         finally:
+            # TensorBoard 기록 파일을 닫는다.
             if writer is not None:
                 writer.close()
 
@@ -179,9 +266,7 @@ class OnPolicyRunner:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
-            "specification": self._env.specification,
             "train_cfg": self._cfg,
-            "environment_configuration": self._env.training_configuration,
             "curriculum": self._env.curriculum_state(),
             "phase": self._phase,
             "model_state_dict": self._model.state_dict(),
@@ -192,46 +277,39 @@ class OnPolicyRunner:
         }, path)
 
     def load(self, path, mode="resume"):
-        """재개·단계 전환·평가를 구분해 체크포인트를 복원한다.
+        """학습 재개 또는 평가 방식에 따라 모델과 학습 상태를 복원한다.
 
-        resume은 같은 단계의 학습을 그대로 이어가므로 학습 설정과 보상·명령 설정까지
-        완전히 같아야 한다. transfer는 1단계 정책을 2단계로 넘기는 경로이며,
-        관측·제어 규격은 동일해야 하지만 보상과 지형 설정의 차이는 허용한다.
+        resume은 checkpoint 단계가 현재 단계와 같으면 학습 상태 전체를 복원하고,
+        다르면 모델과 명령 curriculum만 이어받아 새 단계 학습을 시작한다.
         """
-        if mode not in ("resume", "transfer", "evaluate"):
+        if mode not in ("resume", "evaluate"):
             raise ValueError(f"지원하지 않는 checkpoint 사용 방식: {mode}")
         checkpoint = torch.load(path, map_location=self._device, weights_only=True)
-        if checkpoint["specification"] != self._env.specification:
-            raise ValueError("체크포인트의 관절·관측·action 규격이 현재 환경과 다릅니다.")
-        if checkpoint["train_cfg"]["policy"] != self._cfg["policy"]:
-            raise ValueError("체크포인트와 정책/정규화 설정이 다릅니다.")
-        if mode == "resume":
-            if checkpoint["phase"] != self._phase:
-                raise ValueError("다른 단계의 체크포인트입니다. 단계 전환에는 transfer를 사용하세요.")
-            if checkpoint["train_cfg"] != self._cfg:
-                raise ValueError("학습 재개에는 저장된 학습 설정을 사용해야 합니다.")
-            if checkpoint["environment_configuration"] != self._env.training_configuration:
-                raise ValueError("학습 재개 시 보상·관측·랜덤화·명령 설정이 다릅니다.")
-        if mode == "transfer" and checkpoint["phase"] + 1 != self._phase:
-            raise ValueError("transfer는 직전 단계의 체크포인트에서만 이어받을 수 있습니다.")
 
-        # 정규화 통계는 모델 버퍼에 있으므로 세 방식 모두 그대로 이어받는다.
+        # 모델 가중치와 모델 버퍼에 있는 관측 정규화 통계를 복원한다.
         self._model.load_state_dict(checkpoint["model_state_dict"])
         self._normalization_initialized = checkpoint["normalization_initialized"]
-        if mode == "resume":
+
+        same_phase = checkpoint["phase"] == self._phase
+        if mode == "resume" and same_phase:
+            # 같은 단계는 optimizer·AdaBoot 통계·명령 curriculum·반복 횟수를 모두 복원한다.
             self._algorithm.load_state_dict(checkpoint["optimizer_state_dict"])
             self._adaboot.load_state_dict(checkpoint["adaboot"])
             self._env.load_curriculum_state(checkpoint["curriculum"])
             self._iteration = checkpoint["iteration"]
-        elif mode == "transfer":
-            # 보상 구성이 바뀌어 gradient·return 스케일이 달라지므로
-            # optimizer 모멘텀과 AdaBoot return 통계는 이어받지 않는다.
+        elif mode == "resume":
+            # 다른 단계는 명령 curriculum만 복원하고 optimizer·AdaBoot·반복 횟수는 새로 시작한다.
             self._env.load_curriculum_state(checkpoint["curriculum"])
             self._iteration = 0
         else:
+            # 평가는 반복 횟수만 기록용으로 복원한다.
             self._iteration = checkpoint["iteration"]
-        log.info("checkpoint=%s mode=%s phase=%d iteration=%d loaded",
-                 path, mode, self._phase, self._iteration)
+
+        # 진행 중 episode의 return·길이 기록을 초기화하고 적재 결과를 터미널에 기록한다.
+        self._episode_return.zero_()
+        self._episode_steps.zero_()
+        log.info("checkpoint=%s mode=%s checkpoint_phase=%d phase=%d iteration=%d loaded",
+                 path, mode, checkpoint["phase"], self._phase, self._iteration)
 
     def get_inference_policy(self, device=None):
         """정규화 갱신이나 실제 속도 입력 없이 결정적 정책을 반환한다."""

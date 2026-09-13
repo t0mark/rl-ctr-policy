@@ -3,14 +3,14 @@
 
 """학습 2단계: 어려운 지형에서 기준 동작 추종 보상 없이 적응 보행을 학습한다.
 
-1단계 정책을 이어받아 시작하며, 모델 가중치와 정규화 통계·명령 curriculum만 넘겨받고
-optimizer 모멘텀과 AdaBoot 통계는 새로 시작한다(보상 구성이 바뀌어 스케일이 달라진다).
+--resume에 1단계 checkpoint를 지정하면 모델 가중치·정규화 통계·명령 curriculum만 이어받아
+2단계를 시작하고, 2단계 checkpoint를 지정하면 중단된 2단계 학습 상태 전체를 이어간다.
 
 실행 명령어:
     ./isaaclab.sh -p scripts/02_phase2_train.py --mode pilot --robot-id unitree_g1 \
-        --transfer-from data/robot/policy/unitree_g1/phase1/<실행시각>/model_p1_3000.pt
+        --resume data/robot/policy/unitree_g1/phase1/<실행시각>/model_p1_3000.pt
     ./isaaclab.sh -p scripts/02_phase2_train.py --mode full --robot-id unitree_g1 \
-        --transfer-from data/robot/policy/unitree_g1/phase1/<실행시각>/model_p1_3000.pt --headless
+        --resume data/robot/policy/unitree_g1/phase1/<실행시각>/model_p1_3000.pt --headless
 
 산출물 경로:
     data/robot/policy/{robot-id}/phase2/{실행시각}/model_p2_{iteration}.pt
@@ -39,12 +39,10 @@ def main():
     parser.add_argument("--num_envs", type=int)
     parser.add_argument("--max_iterations", type=int)
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--transfer-from", type=Path, help="이어받을 1단계 checkpoint 경로")
-    parser.add_argument("--resume", type=Path, help="중단된 2단계 학습을 이어갈 checkpoint 경로")
+    parser.add_argument("--resume", type=Path, required=True,
+                        help="이어받을 1단계 checkpoint 또는 이어갈 2단계 checkpoint 경로")
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    if (args.transfer_from is None) == (args.resume is None):
-        parser.error("--transfer-from(1단계 이어받기) 또는 --resume(2단계 재개) 중 하나만 지정해야 합니다.")
     launcher = AppLauncher(args)
     session = None
     try:
@@ -60,11 +58,8 @@ def main():
             device=args.device, num_envs=resolve_num_envs(args.mode, args.num_envs),
             log_dir=run_dir, seed=args.seed)
 
-        # 단계 전환과 같은 단계 재개는 검증 규칙이 다르므로 명시적으로 구분한다.
-        if args.transfer_from is not None:
-            session.runner.load(args.transfer_from, mode="transfer")
-        else:
-            session.runner.load(args.resume, mode="resume")
+        # 지정한 checkpoint의 단계에 맞춰 1단계 정책을 이어받거나 2단계 학습을 재개한다.
+        session.runner.load(args.resume, mode="resume")
         (run_dir / "train_cfg.yaml").write_text(yaml.safe_dump(train_cfg, allow_unicode=True))
         (run_dir / "environment_spec.yaml").write_text(yaml.safe_dump(session.wrapper.specification))
         logging.info("mode=%s run_dir=%s", args.mode, run_dir)
