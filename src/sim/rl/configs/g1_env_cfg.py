@@ -22,7 +22,7 @@ from isaaclab.utils import configclass
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from src.sim.rl.env_cfg import RewardsCfg, VelocityEnvCfg
-from src.sim.rl.mdp import rewards as paper_rewards
+from src.sim.rl.mdp import rewards
 from src.sim.rl.paths import ROOT_DIR
 from src.sim.rl.mdp.actuators import StrengthPDActuatorCfg
 
@@ -85,13 +85,13 @@ class G1Rewards(RewardsCfg):
     # 종료되지 않고 살아있는 동안 매 스텝 보너스를 준다.
     alive = RewTerm(func=mdp.is_alive, weight=0.15)
     # Two-Phase Table 4의 공중 시간 항목은 착지 시 음의 보상을 준다.
-    feet_air_time = RewTerm(
-        func=paper_rewards.feet_air_time, weight=-0.001,
+    feet_air_time_raw = RewTerm(
+        func=rewards.feet_air_time, weight=-0.001,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=G1_FOOT_BODY_NAMES,
                                              preserve_order=True)},
     )
-    feet_slip = RewTerm(
-        func=paper_rewards.feet_slip,
+    contact_no_vel_xy_norm = RewTerm(
+        func=rewards.feet_slip,
         weight=-0.005,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=G1_FOOT_BODY_NAMES,
@@ -100,26 +100,26 @@ class G1Rewards(RewardsCfg):
         },
     )
     # 허리 관절이 기본 자세에서 벗어나는 정도를 다리와 분리해 억제한다.
-    joint_deviation_waist = RewTerm(
+    waist_pos_l1 = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_WAIST_JOINT_NAMES)},
     )
     # 고관절 yaw·roll이 기본 자세에서 벗어나는 정도를 억제해 발의 좌우 위치를 안정화한다.
-    joint_deviation_hip = RewTerm(
+    hip_pos_l1 = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_HIP_DEVIATION_JOINT_NAMES)},
     )
     # 사인파 기준 동작 추종. 학습 1단계에서만 활성화한다.
-    joint_position_tracking = RewTerm(
-        func=paper_rewards.joint_position_tracking,
+    ref_dof_pos = RewTerm(
+        func=rewards.joint_position_tracking,
         weight=3.2,
         params={"coefficient": 2.0, "asset_cfg": SceneEntityCfg("robot")},
     )
     # 스윙 위상에서 발이 접촉하는 경우를 벌한다.
-    gait_phase_contact = RewTerm(
-        func=paper_rewards.gait_phase_contact,
+    contact_swing = RewTerm(
+        func=rewards.gait_phase_contact,
         weight=-0.001,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=G1_FOOT_BODY_NAMES,
@@ -128,7 +128,7 @@ class G1Rewards(RewardsCfg):
     )
     # 발 간격이 허용 범위 안에 있을수록 보상한다.
     feet_distance = RewTerm(
-        func=paper_rewards.lateral_distance,
+        func=rewards.lateral_distance,
         weight=0.2,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=G1_FOOT_BODY_NAMES, preserve_order=True),
@@ -138,7 +138,7 @@ class G1Rewards(RewardsCfg):
     )
     # 무릎 간격이 허용 범위 안에 있을수록 보상한다.
     knee_distance = RewTerm(
-        func=paper_rewards.lateral_distance,
+        func=rewards.lateral_distance,
         weight=0.2,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=G1_KNEE_BODY_NAMES, preserve_order=True),
@@ -149,19 +149,19 @@ class G1Rewards(RewardsCfg):
     # 중력의 수평 성분 제곱합은 오차이므로 음의 가중치로 발의 기울기를 억제한다.
     # 경사면 법선 추종이 아니라 세계 수평 유지이며 Table 4의 모호한 축 표기를 구체화한다.
     feet_orientation = RewTerm(
-        func=paper_rewards.feet_orientation,
+        func=rewards.feet_orientation,
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=G1_FOOT_BODY_NAMES,
                                             preserve_order=True)},
     )
     # 몸통의 급격한 속도 변화를 억제한다. 계수는 제어 주기당 속도 변화량에 적용한다.
-    root_acceleration = RewTerm(
-        func=paper_rewards.RootAcceleration,
+    base_acc = RewTerm(
+        func=rewards.RootAcceleration,
         weight=0.2,
         params={"asset_cfg": SceneEntityCfg("robot"), "coefficient": G1_ROOT_ACCELERATION_COEFFICIENT},
     )
     # 관절 떨림을 억제한다.
-    joint_vel_l2 = RewTerm(
+    dof_vel = RewTerm(
         func=mdp.joint_vel_l2,
         weight=-5.0e-3,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_ACTUATED_JOINT_NAMES)},
@@ -207,14 +207,14 @@ class G1EnvCfg(VelocityEnvCfg):
         self.actions.joint_pos.delay_range_s = (0.0, 0.010)
         for event in (self.events.add_base_mass, self.events.base_com):
             event.params["asset_cfg"].body_names = ["torso_link"]
-        self.rewards.body_height.params["target_height"] = UNITREE_G1_CFG.init_state.pos[2]
-        self.rewards.feet_clearance.params["target_height"] = G1_FOOT_CLEARANCE_HEIGHT
-        self.rewards.feet_clearance.params["sole_offset"] = G1_FOOT_SOLE_OFFSET
-        self.rewards.feet_clearance.params["asset_cfg"].body_names = G1_FOOT_BODY_NAMES
-        self.rewards.feet_clearance.params["asset_cfg"].preserve_order = True
-        for reward in (self.rewards.joint_power, self.rewards.default_joint_tracking):
+        self.rewards.base_height_terrain.params["target_height"] = UNITREE_G1_CFG.init_state.pos[2]
+        self.rewards.feet_swing_height_terrain_phase.params["target_height"] = G1_FOOT_CLEARANCE_HEIGHT
+        self.rewards.feet_swing_height_terrain_phase.params["sole_offset"] = G1_FOOT_SOLE_OFFSET
+        self.rewards.feet_swing_height_terrain_phase.params["asset_cfg"].body_names = G1_FOOT_BODY_NAMES
+        self.rewards.feet_swing_height_terrain_phase.params["asset_cfg"].preserve_order = True
+        for reward in (self.rewards.dof_power, self.rewards.default_dof_pos):
             reward.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=G1_ACTUATED_JOINT_NAMES)
-        self.rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg(
+        self.rewards.dof_acc_physics_step.params["asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=G1_ACTUATED_JOINT_NAMES)
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 2.0)
         self.commands.base_velocity.ranges.lin_vel_y = (-0.5, 0.5)

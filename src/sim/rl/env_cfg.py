@@ -38,9 +38,9 @@ from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 # (feet_air_time_positive_biped, joint_deviation_l1, UniformVelocityCommandCfg 등 포함).
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from src.sim.rl.mdp import (
-    rewards as paper_rewards,
-    events as paper_events,
-    observations as paper_observations,
+    rewards,
+    events,
+    observations,
 )
 from src.sim.rl.mdp.gait import GaitCfg
 from src.sim.rl.mdp.velocity_command import CurriculumVelocityCommandCfg
@@ -141,7 +141,7 @@ class CommandsCfg:
 class ActionsCfg:
     """액션 사양. joint_names는 로봇별 파일에서 실제 제어 대상 관절로 좁혀서 오버라이드한다."""
 
-    joint_pos = paper_events.DelayedJointPositionActionCfg(
+    joint_pos = events.DelayedJointPositionActionCfg(
         asset_name="robot", joint_names=[".*"], scale=0.25, use_default_offset=True
     )
 
@@ -154,9 +154,9 @@ class ObservationsCfg:
     class PolicyCurrentCfg(ObsGroup):
         """actor 부분 관측으로, 실제 로봇 센서로 얻을 수 있는 현재 시점의 단일 noisy 표본."""
 
-        gait_phase = ObsTerm(func=paper_observations.gait_phase)
+        gait_phase = ObsTerm(func=observations.gait_phase)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Gnoise(mean=0.0, std=0.2))
-        base_roll_pitch = ObsTerm(func=paper_observations.base_roll_pitch, noise=Gnoise(mean=0.0, std=0.06))
+        base_roll_pitch = ObsTerm(func=observations.base_roll_pitch, noise=Gnoise(mean=0.0, std=0.06))
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Gnoise(mean=0.0, std=0.05))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Gnoise(mean=0.0, std=1.5))
@@ -175,9 +175,9 @@ class ObservationsCfg:
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         height_scan = ObsTerm(func=mdp.height_scan,
                               params={"sensor_cfg": SceneEntityCfg("height_scanner")}, clip=(-1.0, 1.0))
-        left_foot_height_scan = ObsTerm(func=paper_observations.foot_height_scan,
+        left_foot_height_scan = ObsTerm(func=observations.foot_height_scan,
                                         params={"sensor_cfg": SceneEntityCfg("left_foot_scanner")}, clip=(-1.0, 1.0))
-        right_foot_height_scan = ObsTerm(func=paper_observations.foot_height_scan,
+        right_foot_height_scan = ObsTerm(func=observations.foot_height_scan,
                                          params={"sensor_cfg": SceneEntityCfg("right_foot_scanner")}, clip=(-1.0, 1.0))
 
         def __post_init__(self):
@@ -257,19 +257,19 @@ class EventCfg:
         },
     )
     base_external_force_torque = EventTerm(
-        func=paper_events.randomize_disturbance, mode="reset",
+        func=events.randomize_disturbance, mode="reset",
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*"),
                 "force_range": (0.0, 0.0)},
     )
     # action이 출력될 때마다 각 링크에 무작위 힘을 적용한다. 주기는 __post_init__에서 맞춘다.
     disturbance = EventTerm(
-        func=paper_events.randomize_disturbance, mode="interval", interval_range_s=(0.02, 0.02),
+        func=events.randomize_disturbance, mode="interval", interval_range_s=(0.02, 0.02),
         params={"asset_cfg": SceneEntityCfg("robot", body_names=".*"),
                 "force_range": (-5.0, 5.0), "probability": 1.0},
     )
-    motor_strength = EventTerm(func=paper_events.randomize_motor_strength, mode="startup",
+    motor_strength = EventTerm(func=events.randomize_motor_strength, mode="startup",
                               params={"factor_range": (0.8, 1.2)})
-    torque_delay = EventTerm(func=paper_events.randomize_torque_delay, mode="startup",
+    torque_delay = EventTerm(func=events.randomize_torque_delay, mode="startup",
                             params={"delay_range_s": (0.0, 0.010)})
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -296,31 +296,32 @@ class RewardsCfg:
     """Two-Phase Table 4를 기준으로 보상 가중치와 명시적인 자세 오차 벌점을 정의한다."""
 
     # 명령과 실제 속도를 중력 정렬 yaw 좌표계에서 비교해 몸통 기울기의 영향을 배제한다.
-    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=2.4,
-                                  params={"command_name": "base_velocity", "std": 0.5})
-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.1,
-                                 params={"command_name": "base_velocity", "std": 0.5})
+    tracking_lin_vel_yaw_frame = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=2.4,
+                                         params={"command_name": "base_velocity", "std": 0.5})
+    tracking_ang_vel_world = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.1,
+                                     params={"command_name": "base_velocity", "std": 0.5})
     # 수평 중력 성분은 자세 오차이므로 음의 가중치로 기울어짐을 억제한다.
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
+    orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
     # 관절 가속도와 관절 파워는 DreamWaQ Table I의 수식과 가중치를 사용한다.
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    joint_power = RewTerm(func=paper_rewards.joint_power, weight=-2.0e-5,
-                         params={"asset_cfg": SceneEntityCfg("robot")})
-    velocity_mismatch = RewTerm(func=paper_rewards.velocity_mismatch, weight=0.5,
-                                params={"asset_cfg": SceneEntityCfg("robot")})
+    dof_acc_physics_step = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    dof_power = RewTerm(func=rewards.joint_power, weight=-2.0e-5,
+                        params={"asset_cfg": SceneEntityCfg("robot")})
+    vel_mismatch = RewTerm(func=rewards.velocity_mismatch, weight=0.5,
+                           params={"asset_cfg": SceneEntityCfg("robot")})
     # 기본 자세 추종은 지수 보상이며 기준 동작 추종보다 작은 가중치를 쓴다.
-    default_joint_tracking = RewTerm(func=paper_rewards.default_joint_tracking, weight=0.5,
-                                    params={"asset_cfg": SceneEntityCfg("robot")})
-    body_height = RewTerm(func=paper_rewards.body_height, weight=-1.0,
-                         params={"target_height": 0.75, "asset_cfg": SceneEntityCfg("robot"),
-                                 "sensor_cfg": SceneEntityCfg("height_scanner")})
-    feet_clearance = RewTerm(func=paper_rewards.feet_clearance, weight=-0.01,
-                            params={"target_height": 0.08, "sole_offset": 0.0,
-                                    "asset_cfg": SceneEntityCfg("robot", body_names=".*FOOT"),
-                                    "left_sensor_cfg": SceneEntityCfg("left_foot_scanner"),
-                                    "right_sensor_cfg": SceneEntityCfg("right_foot_scanner")})
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    action_smoothness = RewTerm(func=paper_rewards.action_smoothness, weight=-0.01)
+    default_dof_pos = RewTerm(func=rewards.default_joint_tracking, weight=0.5,
+                              params={"asset_cfg": SceneEntityCfg("robot")})
+    base_height_terrain = RewTerm(func=rewards.body_height, weight=-1.0,
+                                  params={"target_height": 0.75, "asset_cfg": SceneEntityCfg("robot"),
+                                          "sensor_cfg": SceneEntityCfg("height_scanner")})
+    feet_swing_height_terrain_phase = RewTerm(
+        func=rewards.feet_clearance, weight=-0.01,
+        params={"target_height": 0.08, "sole_offset": 0.0,
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*FOOT"),
+                "left_sensor_cfg": SceneEntityCfg("left_foot_scanner"),
+                "right_sensor_cfg": SceneEntityCfg("right_foot_scanner")})
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    action_smoothness = RewTerm(func=rewards.action_smoothness, weight=-0.01)
 
 @configclass
 class TerminationsCfg:
@@ -453,14 +454,14 @@ def configure_training_phase(cfg, phase):
     cfg.scene.terrain.max_init_terrain_level = PHASE_INITIAL_TERRAIN_LEVELS[phase]
 
     # 기준 동작 추종 보상 설정을 별도로 보관한다.
-    reference = cfg.rewards.joint_position_tracking
+    reference = cfg.rewards.ref_dof_pos
     if reference is not None:
         cfg._phase1_reference_reward = copy.deepcopy(reference)
     if not hasattr(cfg, "_phase1_reference_reward"):
         raise ValueError("1단계 기준 동작 보상 설정이 없습니다.")
 
     # 1단계는 기준 동작 추종 보상을 켜고, 2단계는 None으로 두어 보상 계산에서 제외한다.
-    cfg.rewards.joint_position_tracking = (
+    cfg.rewards.ref_dof_pos = (
         copy.deepcopy(cfg._phase1_reference_reward) if phase == 1 else None)
     cfg.training_phase = phase
     return cfg
