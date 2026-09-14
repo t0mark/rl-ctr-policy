@@ -205,26 +205,21 @@ class G1EnvCfg(VelocityEnvCfg):
                 term.params = {"asset_cfg": SceneEntityCfg("robot",
                                                            joint_names=G1_ACTUATED_JOINT_NAMES)}
         self.actions.joint_pos.delay_range_s = (0.0, 0.010)
-        # 질량·무게중심 랜덤화는 몸통 링크만 대상으로 한다. 외란은 전체 링크에 적용한다.
         for event in (self.events.add_base_mass, self.events.base_com):
             event.params["asset_cfg"].body_names = ["torso_link"]
         self.rewards.body_height.params["target_height"] = UNITREE_G1_CFG.init_state.pos[2]
-        # 위상 mask와 순서를 맞추기 위해 발 링크를 [왼발, 오른발]로 고정한다.
         self.rewards.feet_clearance.params["target_height"] = G1_FOOT_CLEARANCE_HEIGHT
         self.rewards.feet_clearance.params["sole_offset"] = G1_FOOT_SOLE_OFFSET
         self.rewards.feet_clearance.params["asset_cfg"].body_names = G1_FOOT_BODY_NAMES
         self.rewards.feet_clearance.params["asset_cfg"].preserve_order = True
-        # 토크·기본 자세는 RL 제어 관절 전체를, 가속도는 다리의 큰 관절을 대상으로 한다.
         for reward in (self.rewards.joint_power, self.rewards.default_joint_tracking):
             reward.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=G1_ACTUATED_JOINT_NAMES)
         self.rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=G1_ACTUATED_JOINT_NAMES)
-        # 명령 최대 범위는 전진 0~1 m/s, 횡방향 ±0.5 m/s, yaw ±1 rad/s로 둔다.
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 2.0)
         self.commands.base_velocity.ranges.lin_vel_y = (-0.5, 0.5)
         self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)
         self.terminations.base_contact.params["sensor_cfg"].body_names = "torso_link"
-        # 휴머노이드는 사족보행용 리셋 랜덤화를 견디지 못하므로 공식 G1 예제 값을 쓴다.
         self.events.reset_robot_joints.params["position_range"] = (1.0, 1.0)
         self.events.reset_base.params["velocity_range"] = {
             axis: (0.0, 0.0) for axis in ("x", "y", "z", "roll", "pitch", "yaw")}

@@ -464,3 +464,54 @@ def configure_training_phase(cfg, phase):
         copy.deepcopy(cfg._phase1_reference_reward) if phase == 1 else None)
     cfg.training_phase = phase
     return cfg
+
+
+# 평가 기본 동역학에서 로봇 링크에 고정 적용할 마찰계수이다.
+_NOMINAL_FRICTION = 1.0
+
+# 평가 기본 동역학에서 제거하는 랜덤화·외란 이벤트 이름이다.
+_RANDOMIZATION_EVENT_NAMES = (
+    "add_base_mass", "base_com", "randomize_link_mass", "randomize_actuator_gains",
+    "motor_strength", "torque_delay", "base_external_force_torque", "disturbance",
+)
+
+
+def configure_evaluation(cfg, command, flat_terrain=False, observation_noise=False):
+    """고정 명령·평가 지형·관측 노이즈·기본 동역학의 평가 조건을 환경 설정에 적용한다.
+
+    configure_training_phase()로 단계 지형을 적용한 뒤 호출한다. command는 [vx, vy, yaw rate]이다.
+    """
+    # 평지 평가면 지형을 평면으로 바꾸고, 지형 curriculum을 끈다.
+    if flat_terrain:
+        cfg.scene.terrain.terrain_type = "plane"
+        cfg.scene.terrain.terrain_generator = None
+        cfg.scene.terrain.visual_material = None
+    cfg.curriculum.terrain_levels = None
+    if cfg.scene.terrain.terrain_generator is not None:
+        cfg.scene.terrain.terrain_generator.curriculum = False
+
+    # 명령 curriculum과 정지 환경을 끄고 명령을 지정 값으로 고정한다.
+    velocity_command = cfg.commands.base_velocity
+    velocity_command.curriculum_enabled = False
+    velocity_command.rel_standing_envs = 0.0
+    velocity_command.ranges.lin_vel_x = (command[0], command[0])
+    velocity_command.ranges.lin_vel_y = (command[1], command[1])
+    velocity_command.ranges.ang_vel_z = (command[2], command[2])
+
+    # 관측 노이즈 사용 여부를 적용한다.
+    cfg.observations.policy_current.enable_corruption = observation_noise
+
+    # 로봇 링크 마찰계수를 고정값으로 설정한다.
+    friction = (_NOMINAL_FRICTION, _NOMINAL_FRICTION)
+    cfg.events.physics_material.params["static_friction_range"] = friction
+    cfg.events.physics_material.params["dynamic_friction_range"] = friction
+
+    # 질량·무게중심·PD 게인·모터 출력·토크 지연 랜덤화와 외란 이벤트를 제거한다.
+    for name in _RANDOMIZATION_EVENT_NAMES:
+        if getattr(cfg.events, name, None) is None:
+            raise AttributeError(f"랜덤화 이벤트 {name}이 환경 설정에 없습니다.")
+        setattr(cfg.events, name, None)
+
+    # action 지연을 제거한다.
+    cfg.actions.joint_pos.delay_range_s = (0.0, 0.0)
+    return cfg

@@ -46,6 +46,14 @@ from ..storage.rollout_storage import RolloutStorage
 
 log = logging.getLogger(__name__)
 
+# 스텝 평균이 아닌 합계로 집계하는 종료 사유별 발생 수 진단값의 이름 접두사.
+TERMINATION_COUNT_PREFIX = "TerminationCount/"
+
+# 평가 진단값에서 집계 대상 환경 수를 전달하는 항목 이름.
+MEASURED_ENVS_KEY = "Evaluation/measured_envs"
+
+# 평가 진행 상황을 터미널에 기록하는 시뮬레이션 시간 간격(초).
+EVALUATION_PROGRESS_LOG_INTERVAL_S = 2.0
 
 
 def _format_iteration_log(iteration, total_iterations, metrics, eta_seconds):
@@ -217,7 +225,7 @@ class OnPolicyRunner:
 
                 # rollout 통계·curriculum 지표를 학습 지표에 합쳐 TensorBoard와 터미널에 기록하고 누적기를 비운다.
                 for key, value in diagnostics.items():
-                    divisor = 1 if key.startswith("TerminationCount/") else self._steps
+                    divisor = 1 if key.startswith(TERMINATION_COUNT_PREFIX) else self._steps
                     metrics[key] = (value / divisor).item()
                 for key, value in manager_logs.items():
                     metrics["Manager/" + key] = (value / manager_samples.clamp_min(1)).item()
@@ -260,6 +268,91 @@ class OnPolicyRunner:
             # TensorBoard 기록 파일을 닫는다.
             if writer is not None:
                 writer.close()
+
+    def evaluate(self, num_steps, warmup_steps):
+        """결정적 정책으로 num_steps만큼 환경을 진행하며 평가 지표를 집계한다.
+
+        episode 시작 후 warmup_steps 이전 표본은 속도 추정 오차에서 제외하고, 진단값은 환경이 전달한
+        집계 대상 환경 수로 가중 평균한다. 넘어짐은 평가 전체 구간에서 센다.
+        """
+        if warmup_steps < 0 or num_steps <= warmup_steps:
+            raise ValueError("평가 스텝 수는 출발 구간 스텝 수보다 커야 합니다.")
+        env = self._env
+        policy = self.get_inference_policy()
+
+        # 진단값 합, 집계 환경 수, 추정 속도 오차, 넘어짐 누적기를 준비한다.
+        diagnostic_sums = {}
+        measured_envs = torch.zeros((), device=self._device)
+        estimate_squared_error = torch.zeros(3, device=self._device)
+        estimate_samples = torch.zeros((), device=self._device)
+        falls = torch.zeros((), device=self._device)
+        first_fall_step = torch.full((env.num_envs,), -1, dtype=torch.long, device=self._device)
+        progress_interval = max(1, round(EVALUATION_PROGRESS_LOG_INTERVAL_S / env.step_dt))
+
+        observation = env.get_observations()
+        with torch.no_grad():
+            for step in range(1, num_steps + 1):
+                # 출발 구간이 지난 환경만 행동 전 관측 이력의 추정 속도 제곱 오차를 누적한다.
+                measured = (env.episode_length_buf >= warmup_steps).float().unsqueeze(-1)
+                error = self._model.estimate_velocity(observation["history"]) - observation["velocity"]
+                estimate_squared_error += (error.square() * measured).sum(0)
+                estimate_samples += measured.sum()
+
+                # 결정적 정책으로 한 스텝 진행한다.
+                observation, result = env.step(policy(observation["history"]))
+
+                # 종료 수는 그대로, 나머지 진단값은 집계 대상 환경 수를 곱해 합산한다.
+                diagnostics = result.get("diagnostics", {})
+                if MEASURED_ENVS_KEY not in diagnostics:
+                    raise RuntimeError("평가 진단값에 집계 대상 환경 수가 없습니다. 평가용 환경이 필요합니다.")
+                count = diagnostics[MEASURED_ENVS_KEY]
+                measured_envs += count
+                for key, value in diagnostics.items():
+                    if key == MEASURED_ENVS_KEY:
+                        continue
+                    weight = 1.0 if key.startswith(TERMINATION_COUNT_PREFIX) else count
+                    diagnostic_sums[key] = diagnostic_sums.get(key, 0.0) + value * weight
+
+                # 넘어짐 수와 환경별 첫 넘어짐 스텝을 기록한다.
+                terminated = result["terminated"]
+                falls += terminated.sum()
+                first_fall_step.masked_fill_(terminated & (first_fall_step < 0), step)
+
+                # 일정 시뮬레이션 시간마다 진행 시간과 누적 넘어짐 수를 기록한다.
+                if step % progress_interval == 0:
+                    log.info("평가 진행: %.1f/%.1f s, 넘어짐 %d회",
+                             step * env.step_dt, num_steps * env.step_dt, int(falls.item()))
+
+        if measured_envs.item() == 0 or estimate_samples.item() == 0:
+            raise RuntimeError("출발 구간 이후 집계된 표본이 없습니다. 평가 스텝 수를 늘려야 합니다.")
+
+        # 종료 수는 합계로, 나머지 진단값은 집계 환경 수 평균으로 변환해 한 번에 CPU로 옮긴다.
+        keys = list(diagnostic_sums)
+        sums = torch.stack([diagnostic_sums[key].float() for key in keys])
+        divisors = torch.stack([torch.ones_like(measured_envs) if key.startswith(TERMINATION_COUNT_PREFIX)
+                                else measured_envs for key in keys])
+        diagnostics = dict(zip(keys, (sums / divisors).tolist()))
+
+        # 넘어짐 수·넘어지지 않은 환경 비율·첫 넘어짐 시각을 정리한다.
+        num_envs = env.num_envs
+        total_falls = int(falls.item())
+        fell = first_fall_step >= 0
+        fell_count = int(fell.sum().item())
+        return {
+            "steps": num_steps, "num_envs": num_envs, "warmup_s": warmup_steps * env.step_dt,
+            "measured_env_seconds": measured_envs.item() * env.step_dt,
+            "velocity_rmse_mps": (estimate_squared_error / estimate_samples).sqrt().tolist(),
+            "falls": {
+                "total": total_falls,
+                "per_env_mean": total_falls / num_envs,
+                "per_env_minute": total_falls / (num_envs * num_steps * env.step_dt / 60.0),
+                "never_fell_env_fraction": 1.0 - fell_count / num_envs,
+                "fell_env_count": fell_count,
+                "mean_time_to_first_fall_s": (first_fall_step[fell].float().mean().item() * env.step_dt
+                                              if fell_count else None),
+            },
+            "diagnostics": diagnostics,
+        }
 
     def save(self, path):
         """모델 통계와 입력 규격·실제 반복 횟수를 함께 저장한다."""

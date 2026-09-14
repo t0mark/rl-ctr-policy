@@ -3,8 +3,8 @@
 
 """학습 단계별 환경·wrapper·runner 구성을 한곳에서 담당한다.
 
-단계마다 프로세스를 분리해 실행하므로 1단계·2단계 스크립트가 같은 구성 절차를
-중복해서 갖지 않도록, 구성과 실행은 이 모듈이 맡고 스크립트는 인자 해석만 맡는다.
+단계마다 프로세스를 분리해 실행하며, 구성과 실행은 이 모듈이 맡고
+스크립트는 인자 해석·checkpoint 적재·산출물 기록만 맡는다.
 """
 
 import logging
@@ -16,11 +16,6 @@ from src.sim.rl.models.dwaq_wrapper import DwaqVecEnvWrapper
 from src.dwaq.runners.on_policy_runner import OnPolicyRunner
 
 log = logging.getLogger(__name__)
-
-# 파일럿은 로직 점검용 소수 환경, 본 학습은 논문 Table 6의 병렬 환경 수를 사용한다.
-PILOT_NUM_ENVS = 16
-FULL_NUM_ENVS = 4096
-
 
 class TrainingSession:
     """한 학습 단계의 환경과 runner를 생성하고 학습을 실행한다."""
@@ -75,10 +70,3 @@ class TrainingSession:
     def close(self):
         """시뮬레이션 자원을 정리한다."""
         self._env.close()
-
-
-def resolve_num_envs(mode, override=None):
-    """실행 모드에 맞는 병렬 환경 수를 정한다."""
-    if override is not None:
-        return int(override)
-    return PILOT_NUM_ENVS if mode == "pilot" else FULL_NUM_ENVS

@@ -4,10 +4,13 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 from src.sim.rl.mdp.gait import GaitPhase
 from src.sim.rl.env_cfg import validate_terrain_border
-from src.sim.rl.utils.rollout_diagnostics import RolloutDiagnostics
+from src.sim.rl.utils.rollout_diagnostics import EvaluationDiagnostics, RolloutDiagnostics
 
 # action 2차 차분에 필요한 과거 action 개수.
 ACTION_HISTORY_LENGTH = 2
+
+# 평가 지표 집계에서 각 환경의 episode 시작 후 제외하는 출발 구간(초).
+EVALUATION_WARMUP_S = 2.0
 
 
 class DreamWaQEnv(ManagerBasedRLEnv):
@@ -97,3 +100,25 @@ class DreamWaQEnv(ManagerBasedRLEnv):
         if hasattr(self, "_action_history_steps"):
             self._action_history_steps[env_ids] = 0
             self._previous_previous_action[env_ids] = 0
+
+
+class EvaluationEnv(DreamWaQEnv):
+    """episode 시작 후 출발 구간을 제외해 진단값을 집계하는 평가용 환경."""
+
+    def __init__(self, cfg, warmup_s=EVALUATION_WARMUP_S, **kwargs):
+        """부모 환경을 만든 뒤 진단값 수집기를 평가용으로 교체한다."""
+        super().__init__(cfg, **kwargs)
+        self._warmup_steps = round(warmup_s / self.step_dt)
+        if self._warmup_steps < 1:
+            raise ValueError("출발 구간은 제어 주기 한 번 이상이어야 합니다.")
+        self._diagnostics = EvaluationDiagnostics(self, self._warmup_steps)
+
+    @property
+    def warmup_steps(self):
+        """출발 구간의 제어 스텝 수를 반환한다."""
+        return self._warmup_steps
+
+    @property
+    def diagnostics(self):
+        """평가 요약에 사용할 진단값 수집기를 반환한다."""
+        return self._diagnostics
