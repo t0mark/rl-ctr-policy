@@ -43,6 +43,7 @@ from ..modules.actor_critic_DWAQ import ActorCritic_DWAQ
 from ..algorithms.ppo import PPO
 from ..algorithms.adaboot import AdaBoot
 from ..storage.rollout_storage import RolloutStorage
+from ..utils.best_checkpoint_tracker import BestCheckpointTracker
 
 log = logging.getLogger(__name__)
 
@@ -139,8 +140,9 @@ class OnPolicyRunner:
             self._normalization_initialized = True
         self._model.train()
 
-        # 학습 루프 전에 TensorBoard writer, 남은 시간 계산 기준, rollout 통계 누적기를 준비한다.
+        # 학습 루프 전에 TensorBoard writer, best 체크포인트 판정기, 남은 시간 계산 기준, rollout 통계 누적기를 준비한다.
         writer = SummaryWriter(str(self._log_dir)) if self._log_dir is not None else None
+        best_tracker = BestCheckpointTracker()
         total_iterations = self._iteration + num_learning_iterations
         learn_start_time = time.time()
         completed_returns = []
@@ -219,11 +221,7 @@ class OnPolicyRunner:
                 self._storage.clear()
                 self._iteration += 1
 
-                # 저장 주기마다 체크포인트를 저장한다.
-                if self._log_dir is not None and self._iteration % self._save_interval == 0:
-                    self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
-
-                # rollout 통계·curriculum 지표를 학습 지표에 합쳐 TensorBoard와 터미널에 기록하고 누적기를 비운다.
+                # rollout 통계·curriculum 지표를 학습 지표에 합쳐 TensorBoard와 터미널에 기록한다.
                 for key, value in diagnostics.items():
                     divisor = 1 if key.startswith(TERMINATION_COUNT_PREFIX) else self._steps
                     metrics[key] = (value / divisor).item()
@@ -252,6 +250,19 @@ class OnPolicyRunner:
                 remaining = num_learning_iterations - (local_iteration + 1)
                 eta_seconds = elapsed / (local_iteration + 1) * remaining
                 log.info(_format_iteration_log(self._iteration, total_iterations, metrics, eta_seconds))
+
+                # 저장 주기마다 체크포인트를 저장한다.
+                if self._log_dir is not None and self._iteration % self._save_interval == 0:
+                    self.save(self._log_dir / f"model_p{self._phase}_{self._iteration}.pt")
+
+                # 명령 범위 최대치 도달 후 episode return 이동평균이 최고값을 넘으면 best 체크포인트를 덮어쓴다.
+                if self._log_dir is not None and best_tracker.update(
+                        metrics.get("episode_return"), self._env.curriculum_state()):
+                    self.save(self._log_dir / f"model_p{self._phase}_best.pt")
+                    log.info("best checkpoint 갱신: iteration=%d return_average=%.6g",
+                             self._iteration, best_tracker.best_return_average)
+
+                # rollout 누적기를 비운다.
                 completed_returns.clear()
                 completed_lengths.clear()
                 diagnostics.clear()

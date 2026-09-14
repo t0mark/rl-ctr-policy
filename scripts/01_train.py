@@ -18,6 +18,7 @@
 
 산출물 경로:
     data/robot/policy/{robot-id}/phase{phase}/{실행시각}/model_p{phase}_{iteration}.pt
+    data/robot/policy/{robot-id}/phase{phase}/{실행시각}/model_p{phase}_best.pt
 """
 
 import argparse
