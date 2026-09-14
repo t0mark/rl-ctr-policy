@@ -3,6 +3,7 @@ import torch
 from isaaclab.envs import ManagerBasedRLEnv
 
 from src.sim.rl.mdp.gait import GaitPhase
+from src.sim.rl.env_cfg import validate_terrain_border
 from src.sim.rl.utils.rollout_diagnostics import RolloutDiagnostics
 
 # action 2차 차분에 필요한 과거 action 개수.
@@ -14,6 +15,8 @@ class DreamWaQEnv(ManagerBasedRLEnv):
 
     def __init__(self, cfg, **kwargs):
         """부모 초기화 전후로 필요한 보조 상태를 할당한다."""
+        # 최종 설정으로 로봇이 episode 안에 지형 밖에 도달할 수 없는지 확인한다.
+        validate_terrain_border(cfg)
         self._capture_terminal = False
         self._terminal_critic = None
         self._gait = None

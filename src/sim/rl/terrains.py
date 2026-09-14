@@ -13,7 +13,7 @@ from isaaclab.terrains import TerrainGeneratorCfg
 
 # 두 단계가 공유하는 지형 격자 규격이다.
 _TERRAIN_SIZE = (8.0, 8.0)
-_BORDER_WIDTH = 20.0
+_BORDER_WIDTH = 70.0
 _NUM_ROWS = 10
 _NUM_COLS = 20
 _HORIZONTAL_SCALE = 0.1

@@ -1,4 +1,7 @@
-"""축별 속도 추적 점수에 따라 해당 축의 명령 범위를 단계적으로 확대한다."""
+"""선속도 추적 점수에 따라 선속도 명령 범위를 단계적으로 확대한다.
+
+yaw 명령 범위는 확대 대상이 아니며 설정값을 처음부터 그대로 사용한다.
+"""
 import logging
 import torch
 from isaaclab.envs.mdp.commands.velocity_command import UniformVelocityCommand
@@ -12,7 +15,8 @@ log = logging.getLogger(__name__)
 class CurriculumVelocityCommand(UniformVelocityCommand):
     """축별 추적 점수가 임계값을 넘으면 그 축의 명령 범위만 일정량 확대한다.
 
-    선속도 점수는 x·y 범위를, 각속도 점수는 yaw 범위를 담당한다.
+    점수는 제어 스텝마다 계산한 추적 보상식의 평균이다.
+    yaw 범위는 설정 한계에 고정하며 각속도 점수는 기록용으로만 남긴다.
     """
 
     def __init__(self, cfg, env):
@@ -34,9 +38,13 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
         if (self._limit_low > self._limit_high).any():
             raise ValueError("명령 범위의 하한이 상한보다 큽니다.")
 
-        # 초기 범위는 ±initial_limit을 축별 최대 범위 안으로 잘라서 정한다.
-        self._low = torch.minimum(self._limit_high, self._limit_low.clamp_min(-cfg.initial_limit))
-        self._high = torch.maximum(self._limit_low, self._limit_high.clamp_max(cfg.initial_limit))
+        # 선속도 초기 범위만 ±initial_limit으로 좁히고 yaw는 설정 한계에서 시작한다.
+        self._low = self._limit_low.clone()
+        self._high = self._limit_high.clone()
+        self._low[:2] = torch.minimum(self._limit_high[:2],
+                                      self._limit_low[:2].clamp_min(-cfg.initial_limit))
+        self._high[:2] = torch.maximum(self._limit_low[:2],
+                                       self._limit_high[:2].clamp_max(cfg.initial_limit))
 
         # 판정 구간의 [선속도, 각속도] 점수 합과 스텝 수, 마지막 누적 스텝 번호를 보관한다.
         self._score = torch.zeros(2, device=self.device)
@@ -58,7 +66,7 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
             return
         self._last_metrics_step = step
 
-        # 선속도·yaw 각속도 추적 보상식을 각각 정지·실패 환경까지 포함한 전체 환경 평균으로 누적한다.
+        # 선속도·yaw 각속도 추적 보상식을 정지·실패 환경까지 포함한 전체 환경 평균으로 누적한다.
         if self.cfg.curriculum_enabled:
             velocity = quat_apply_inverse(yaw_quat(self.robot.data.root_quat_w),
                                           self.robot.data.root_lin_vel_w)
@@ -80,14 +88,12 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
         if ids.numel() == 0:
             return
 
-        # 최소 평가 구간이 모이면 축별 평균 점수를 임계값과 비교해 통과한 축의 범위만 넓힌다.
+        # 최소 평가 구간이 모이면 선속도 평균 점수를 임계값과 비교해 x·y 범위만 넓힌다.
         judged = self._steps and self._steps * self._env.step_dt >= self.cfg.minimum_duration_s
         if judged:
             average = self._score / self._steps
-            passed = average > self.cfg.success_threshold
             expansion = torch.zeros(3, device=self.device)
-            expansion[:2] = self.cfg.expansion_step * passed[0]
-            expansion[2] = self.cfg.expansion_step * passed[1]
+            expansion[:2] = self.cfg.expansion_step * (average[0] > self.cfg.success_threshold)
             self._low = torch.maximum(self._limit_low, self._low - expansion)
             self._high = torch.minimum(self._limit_high, self._high + expansion)
             self._score.zero_()
@@ -138,6 +144,10 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
         # 현재 범위를 복원하고 판정 구간을 새로 시작한다.
         self._low.copy_(state["low"])
         self._high.copy_(state["high"])
+
+        # yaw 범위는 커리큘럼 대상이 아니므로 설정 한계로 되돌린다.
+        self._low[2] = self._limit_low[2]
+        self._high[2] = self._limit_high[2]
         self._score.zero_()
         self._steps = 0
 
@@ -150,7 +160,7 @@ class CurriculumVelocityCommand(UniformVelocityCommand):
 
 @configclass
 class CurriculumVelocityCommandCfg(UniformVelocityCommandCfg):
-    """축별 추적 점수가 0.75를 넘을 때 그 축의 명령 범위를 0.05씩 확대하는 명령 설정."""
+    """선속도 추적 점수가 0.75를 넘을 때 선속도 명령 범위를 0.05씩 확대하는 명령 설정."""
 
     class_type: type = CurriculumVelocityCommand
     # curriculum 사용 여부

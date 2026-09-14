@@ -394,6 +394,48 @@ class VelocityEnvCfg(ManagerBasedRLEnvCfg):
                 self.scene.terrain.terrain_generator.curriculum = False
 
 
+# 실제 이동 속도가 명령 최대 속도를 넘을 수 있는 비율이다.
+_SPEED_OVERSHOOT_FACTOR = 1.1
+# 스캐너가 붙은 링크(발 등)가 로봇 root에서 수평으로 떨어질 수 있는 최대 거리(m)이다.
+_SCANNER_LINK_REACH_M = 1.0
+
+
+def validate_terrain_border(cfg):
+    """한 episode 동안 로봇과 지형 스캐너가 지형 메시 밖에 도달할 수 없는지 검증한다.
+
+    가장 바깥 sub-terrain 중심에서 출발해 최대 명령 속도로 episode 끝까지 직진해도
+    스캐너 영역 전체가 테두리 안에 남아야 한다. 조건을 만족하지 않으면 예외를 낸다.
+    """
+    terrain = cfg.scene.terrain
+    generator = terrain.terrain_generator
+    if terrain.terrain_type != "generator" or generator is None:
+        return
+
+    # 명령 범위에서 가능한 최대 평면 속도로 episode 동안 이동할 수 있는 거리를 구한다.
+    ranges = cfg.commands.base_velocity.ranges
+    max_speed = math.hypot(max(abs(value) for value in ranges.lin_vel_x),
+                           max(abs(value) for value in ranges.lin_vel_y))
+    travel_distance = max_speed * cfg.episode_length_s * _SPEED_OVERSHOOT_FACTOR
+
+    # reset 시 sub-terrain 원점에서 벗어날 수 있는 최대 수평 거리를 구한다.
+    pose_range = cfg.events.reset_base.params["pose_range"]
+    spawn_offset = math.hypot(max(abs(value) for value in pose_range.get("x", (0.0, 0.0))),
+                              max(abs(value) for value in pose_range.get("y", (0.0, 0.0))))
+
+    # 스캐너 격자의 최대 반대각선에 링크 도달 거리를 더해 ray 영역의 최대 반경을 구한다.
+    scanners = (cfg.scene.height_scanner, cfg.scene.left_foot_scanner, cfg.scene.right_foot_scanner)
+    scanner_radius = max(math.hypot(*scanner.pattern_cfg.size) / 2.0
+                         for scanner in scanners if scanner is not None)
+    scanner_reach = scanner_radius + _SCANNER_LINK_REACH_M
+
+    # 가장 바깥 sub-terrain 중심에서 메시 끝까지의 거리와 필요한 거리를 비교한다.
+    required_border = travel_distance + spawn_offset + scanner_reach - min(generator.size) / 2.0
+    if generator.border_width < required_border:
+        raise ValueError(
+            f"지형 테두리 폭 {generator.border_width:.1f} m가 episode 내 최대 도달 거리를 덮지 못합니다. "
+            f"필요 폭 {required_border:.1f} m (속도 {max_speed:.2f} m/s, episode {cfg.episode_length_s:.1f} s).")
+
+    
 def configure_training_phase(cfg, phase):
     """학습 단계에 맞는 지형과 기준 동작 보상 활성 여부를 환경 설정에 적용한다.
 

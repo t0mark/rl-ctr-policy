@@ -41,6 +41,9 @@ G1_ACTUATED_JOINT_NAMES = [".*_hip_.*_joint", ".*_knee_joint", ".*_ankle_.*_join
 # 허리 관절. 보행에 직접 쓰이지 않는 관절이라 다리와 분리해 편차를 억제한다.
 G1_WAIST_JOINT_NAMES = ["waist_.*_joint"]
 
+# 발의 좌우 위치를 결정하는 고관절 관절. 전후 구동을 담당하는 pitch는 제외한다.
+G1_HIP_DEVIATION_JOINT_NAMES = [".*_hip_yaw_joint", ".*_hip_roll_joint"]
+
 # 사인파 기준 동작 대상 관절. 좌우 목록은 같은 순서의 대칭 관절이어야 한다.
 G1_REFERENCE_JOINT_NAMES = {
     "left": ["left_hip_pitch_joint", "left_knee_joint", "left_ankle_pitch_joint"],
@@ -101,6 +104,12 @@ class G1Rewards(RewardsCfg):
         func=mdp.joint_deviation_l1,
         weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_WAIST_JOINT_NAMES)},
+    )
+    # 고관절 yaw·roll이 기본 자세에서 벗어나는 정도를 억제해 발의 좌우 위치를 안정화한다.
+    joint_deviation_hip = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.1,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=G1_HIP_DEVIATION_JOINT_NAMES)},
     )
     # 사인파 기준 동작 추종. 학습 1단계에서만 활성화한다.
     joint_position_tracking = RewTerm(
@@ -211,7 +220,7 @@ class G1EnvCfg(VelocityEnvCfg):
         self.rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=G1_ACTUATED_JOINT_NAMES)
         # 명령 최대 범위는 전진 0~1 m/s, 횡방향 ±0.5 m/s, yaw ±1 rad/s로 둔다.
-        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 1.0)
+        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 2.0)
         self.commands.base_velocity.ranges.lin_vel_y = (-0.5, 0.5)
         self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)
         self.terminations.base_contact.params["sensor_cfg"].body_names = "torso_link"

@@ -76,6 +76,7 @@ def main():
         from src.sim.rl.env_cfg import configure_training_phase
         from src.sim.rl.models.dwaq_wrapper import DwaqVecEnvWrapper
         from src.dwaq.runners.on_policy_runner import OnPolicyRunner
+        from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 
         logging.basicConfig(level=logging.INFO)
         path = resolve_checkpoint(args.robot_id, args.phase, args.checkpoint,
@@ -124,8 +125,9 @@ def main():
                 estimated = runner.model.estimate_velocity(observation["history"])
                 squared_error += (estimated - observation["velocity"]).square().sum(0)
                 command = env.command_manager.get_command("base_velocity")
-                measured = torch.cat((observation["velocity"][:, :2],
-                                      env.scene["robot"].data.root_ang_vel_b[:, 2:3]), -1)
+                robot_data = env.scene["robot"].data
+                yaw_frame_velocity = quat_apply_inverse(yaw_quat(robot_data.root_quat_w), robot_data.root_lin_vel_w)
+                measured = torch.cat((yaw_frame_velocity[:, :2], robot_data.root_ang_vel_w[:, 2:3]), -1)
                 tracking_error += (measured-command).abs().sum(0)
                 action = policy(observation["history"])
                 observation, result = wrapper.step(action)
