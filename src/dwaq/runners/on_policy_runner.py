@@ -65,6 +65,8 @@ def _format_iteration_log(iteration, total_iterations, metrics, eta_seconds):
         ("Episodes/timeout_fraction", "Timeout fraction"),
         ("Tracking/linear_error_mps", "Velocity error m/s"),
         ("Tracking/yaw_error_radps", "Yaw error rad/s"),
+        ("Tracking/heading_error_rad", "Heading error rad"),
+        ("Tracking/measured_speed_mps", "Measured speed m/s"),
         ("Control/requested_target_clipped_fraction", "Target clip fraction"),
         ("value", "Value loss"),
         ("policy_kl", "KL"),

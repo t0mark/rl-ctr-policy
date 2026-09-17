@@ -29,6 +29,7 @@ class DreamWaQEnv(ManagerBasedRLEnv):
         self._terminal_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._previous_previous_action = torch.zeros_like(self.action_manager.action)
         self._action_history_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._previous_root_velocity = torch.zeros(self.num_envs, 6, device=self.device)
 
         # 학습 기록용 보행 진단값 수집기를 만든다.
         self._diagnostics = RolloutDiagnostics(self)
@@ -50,6 +51,11 @@ class DreamWaQEnv(ManagerBasedRLEnv):
         return self._previous_previous_action
 
     @property
+    def previous_root_velocity(self):
+        """현재 보상 계산 시 직전 제어 스텝의 root 선속도·각속도를 6차원으로 제공한다."""
+        return self._previous_root_velocity
+
+    @property
     def action_history_valid(self):
         """2차 차분에 필요한 과거 action이 모두 쌓인 환경만 True인 mask를 반환한다."""
         return self._action_history_steps >= ACTION_HISTORY_LENGTH
@@ -59,6 +65,11 @@ class DreamWaQEnv(ManagerBasedRLEnv):
         # Isaac Lab step 전에 manager 로그를 비우고 물리 진행 동안 유효한 명령을 진단용으로 복사한다.
         self.extras["log"] = {}
         self._diagnostics.begin_step()
+
+        # 물리 진행 전의 root 속도를 보관해 보상이 이번 스텝의 변화량을 계산하게 한다.
+        robot = self.scene["robot"].data
+        self._previous_root_velocity.copy_(
+            torch.cat((robot.root_lin_vel_w, robot.root_ang_vel_w), dim=-1))
 
         # terminal critic mask를 비우고 a_(t-2)를 보관한 뒤 Isaac Lab step을 실행한다.
         self._terminal_valid.zero_()

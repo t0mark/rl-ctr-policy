@@ -4,7 +4,6 @@
 관측과 같은 시점의 위상을 사용한다.
 """
 import torch
-from isaaclab.managers import ManagerTermBase
 from isaaclab.utils.math import quat_apply, quat_apply_inverse
 
 # 접촉 기반 보상이 공유하는 접촉력 임계값(N).
@@ -155,34 +154,12 @@ def feet_orientation(env, asset_cfg):
     return projected.reshape(quaternion.shape[0], -1, 3)[..., :2].square().sum((-1, -2))
 
 
-class RootAcceleration(ManagerTermBase):
+def root_acceleration(env, coefficient, asset_cfg):
     """제어 스텝 사이 root 속도 변화량을 지수 보상으로 변환한다.
 
-    선속도와 각속도를 이어 붙인 6차원 속도의 변화 크기를 사용한다.
+    선속도와 각속도를 이어 붙인 6차원 속도의 변화 크기를 사용하며,
+    직전 스텝의 속도는 환경이 step 시작 시점에 보관한 값을 쓴다.
     """
-
-    def __init__(self, cfg, env):
-        """직전 제어 스텝의 root 속도를 보관할 버퍼를 만든다."""
-        super().__init__(cfg, env)
-        self._asset_name = cfg.params["asset_cfg"].name
-        self._previous_velocity = torch.zeros(env.num_envs, 6, device=env.device)
-
-    def reset(self, env_ids=None):
-        """reset된 환경은 초기 상태를 기준으로 삼아 순간 이동을 보상에서 제외한다."""
-        velocity = self._root_velocity()
-        if env_ids is None:
-            self._previous_velocity.copy_(velocity)
-        else:
-            self._previous_velocity[env_ids] = velocity[env_ids]
-
-    def _root_velocity(self):
-        """월드 좌표계의 선속도와 각속도를 6차원 벡터로 잇는다."""
-        robot = self._env.scene[self._asset_name]
-        return torch.cat((robot.data.root_lin_vel_w, robot.data.root_ang_vel_w), dim=-1)
-
-    def __call__(self, env, coefficient, asset_cfg):
-        """직전 스텝 대비 속도 변화 크기로 보상을 계산하고 현재 속도를 보관한다."""
-        velocity = self._root_velocity()
-        change = (velocity - self._previous_velocity).norm(dim=-1)
-        self._previous_velocity.copy_(velocity)
-        return torch.exp(-coefficient * change)
+    robot = env.scene[asset_cfg.name]
+    velocity = torch.cat((robot.data.root_lin_vel_w, robot.data.root_ang_vel_w), dim=-1)
+    return torch.exp(-coefficient * (velocity - env.previous_root_velocity).norm(dim=-1))

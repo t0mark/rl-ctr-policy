@@ -156,7 +156,7 @@ class G1Rewards(RewardsCfg):
     )
     # 몸통의 급격한 속도 변화를 억제한다. 계수는 제어 주기당 속도 변화량에 적용한다.
     base_acc = RewTerm(
-        func=rewards.RootAcceleration,
+        func=rewards.root_acceleration,
         weight=0.2,
         params={"asset_cfg": SceneEntityCfg("robot"), "coefficient": G1_ROOT_ACCELERATION_COEFFICIENT},
     )
