@@ -1,0 +1,20 @@
+robot:
+  id: boston_dynamics_spot
+  asset_config: data/robot/assets/multi-legged/boston_dynamics_spot/boston_dynamics_spot_cfg.py
+  asset_symbol: BOSTON_DYNAMICS_SPOT_CFG
+  controlled_actuators: [hips, knees]
+  controlled_joints:
+    - ".*_h[xy]"
+    - ".*_kn"
+  base: body
+  feet: [fl_foot, fr_foot, hl_foot, hr_foot]
+  body_height: 0.5
+  foot_clearance_height: 0.1
+
+control:
+  action_scale: 0.2
+
+command:
+  linear_x: [-1.0, 1.0]
+  linear_y: [-1.0, 1.0]
+  angular_z: [-1.0, 1.0]

@@ -1,0 +1,40 @@
+# DreamWaQ 학습 설정.
+execution:
+  pilot_num_envs: 16
+  full_num_envs: 4096
+
+policy:
+  # CENet encoder가 입력받는 관측 프레임 수(H).
+  history_length: 5
+  init_noise_std: 1.0
+  activation: elu
+  normalization_min_std: 0.1
+
+algorithm:
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  entropy_coef: 0.01
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 1.0e-3
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  velocity_loss_coef: 1.0
+  prediction_loss_coef: 1.0
+  # 복원 손실은 관측 차원 평균이고 KL은 잠재 차원 합이므로, 두 항의 크기를 맞추는 배율이다.
+  beta: 0.02
+
+adaboot:
+  enabled: true
+  min_episodes: 2
+  epsilon: 1.0e-6
+
+runner:
+  num_steps_per_env: 24
+  save_interval: 50
+  max_iterations: 1000
+  pilot_iterations: 20

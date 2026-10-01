@@ -6,11 +6,10 @@ logs/
 
 .vscode/
 .claude/
-CLAUDE.md
+# CLAUDE.md
 
 reference/
 # data/
 data/robot/policy
 
-plan.md
 _tmp/
