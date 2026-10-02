@@ -1,19 +1,69 @@
 robot:
   id: unitree_g1
-  asset_config: data/robot/assets/humanoid/unitree_g1/unitree_g1_cfg.py
-  asset_symbol: UNITREE_G1_CFG
-  controlled_actuators: [legs, feet, waist]
-  controlled_joints:
-    - ".*_hip_.*_joint"
-    - ".*_knee_joint"
-    - ".*_ankle_.*_joint"
-    - "waist_.*_joint"
+  category: humanoid
+  # 데이터시트의 서 있는 높이(m, 지면~몸체 최상단). 출처: Unitree G1 사양 1320×450×200 mm (standing)
+  standing_height: 1.32
+  # 목표 root 높이 = standing_height - root_to_top
+  root_to_top: 0.531
+
+# 로봇의 전체 관절. 환경 생성 시 USD 관절 목록과 같은지 검사한다.
+joints:
+  - left_hip_pitch_joint
+  - left_hip_roll_joint
+  - left_hip_yaw_joint
+  - left_knee_joint
+  - left_ankle_pitch_joint
+  - left_ankle_roll_joint
+  - right_hip_pitch_joint
+  - right_hip_roll_joint
+  - right_hip_yaw_joint
+  - right_knee_joint
+  - right_ankle_pitch_joint
+  - right_ankle_roll_joint
+  - waist_yaw_joint
+  - waist_roll_joint
+  - waist_pitch_joint
+  - left_shoulder_pitch_joint
+  - left_shoulder_roll_joint
+  - left_shoulder_yaw_joint
+  - left_elbow_joint
+  - left_wrist_roll_joint
+  - left_wrist_pitch_joint
+  - left_wrist_yaw_joint
+  - right_shoulder_pitch_joint
+  - right_shoulder_roll_joint
+  - right_shoulder_yaw_joint
+  - right_elbow_joint
+  - right_wrist_roll_joint
+  - right_wrist_pitch_joint
+  - right_wrist_yaw_joint
+
+# 정책이 제어하는 관절. 제어하지 않는 관절(팔)은 기본 자세를 유지한다.
+controlled_joints:
+  - left_hip_pitch_joint
+  - left_hip_roll_joint
+  - left_hip_yaw_joint
+  - left_knee_joint
+  - left_ankle_pitch_joint
+  - left_ankle_roll_joint
+  - right_hip_pitch_joint
+  - right_hip_roll_joint
+  - right_hip_yaw_joint
+  - right_knee_joint
+  - right_ankle_pitch_joint
+  - right_ankle_roll_joint
+  - waist_yaw_joint
+  - waist_roll_joint
+  - waist_pitch_joint
+
+links:
+  # 몸통 링크. 높이 스캐너·외란·payload가 붙고, 지면에 닿으면 episode를 종료한다.
   base: torso_link
+  # 발 링크. base와 함께 지면 접촉 페널티에서 제외된다.
   feet: [left_ankle_roll_link, right_ankle_roll_link]
-  body_height: 0.78
-  foot_clearance_height: 0.07
 
 control:
+  # 관절 목표각 = 기본 자세 + action_scale × action
   action_scale: 0.25
 
 command:

@@ -27,19 +27,10 @@ def power_distribution(env, asset_cfg):
 
 
 def body_height(env, target_height, sensor_cfg, asset_cfg):
-    """몸통 아래 지면 대비 root 높이의 제곱 오차를 계산한다."""
+    """몸통 아래 지면 대비 root 높이와 목표 높이의 제곱 오차를 계산한다."""
     position = env.scene[asset_cfg.name].data.root_pos_w
     ground = terrain_height(env, position.unsqueeze(1), sensor_cfg).squeeze(1)
     return (target_height - (position[:, 2] - ground)).square()
-
-
-def feet_clearance(env, target_height, sensor_cfg, asset_cfg):
-    """발의 지면 대비 높이 오차 제곱에 발 수평 속도를 곱해 합산한다."""
-    robot = env.scene[asset_cfg.name]
-    position = robot.data.body_pos_w[:, asset_cfg.body_ids]
-    ground = terrain_height(env, position, sensor_cfg)
-    speed = robot.data.body_lin_vel_w[:, asset_cfg.body_ids, :2].norm(dim=-1)
-    return ((target_height - (position[..., 2] - ground)).square() * speed).sum(-1)
 
 
 class ActionSmoothness(ManagerTermBase):

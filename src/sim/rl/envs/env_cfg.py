@@ -10,6 +10,7 @@
 """
 
 import importlib.util
+import re
 from dataclasses import MISSING
 from pathlib import Path
 
@@ -148,7 +149,7 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    """DreamWaQ Table I."""
+    """DreamWaQ Table I + 다리 접촉 페널티."""
 
     tracking_lin_vel = RewTerm(func=mdp.track_lin_vel_xy_exp, weight=1.0,
                                params={"command_name": "base_velocity", "std": 0.5})
@@ -162,13 +163,13 @@ class RewardsCfg:
     body_height = RewTerm(func=rewards.body_height, weight=-1.0,
                           params={"target_height": MISSING, "asset_cfg": SceneEntityCfg("robot"),
                                   "sensor_cfg": SceneEntityCfg("height_scanner")})
-    feet_clearance = RewTerm(func=rewards.feet_clearance, weight=-0.01,
-                             params={"target_height": MISSING, "asset_cfg": SceneEntityCfg("robot"),
-                                     "sensor_cfg": SceneEntityCfg("height_scanner")})
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     action_smoothness = RewTerm(func=rewards.ActionSmoothness, weight=-0.01)
     power_distribution = RewTerm(func=rewards.power_distribution, weight=-1.0e-5,
                                  params={"asset_cfg": SceneEntityCfg("robot")})
+    undesired_contacts = RewTerm(func=mdp.undesired_contacts, weight=-1.0,
+                                 params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=MISSING),
+                                         "threshold": 1.0})
 
 
 @configclass
@@ -184,7 +185,10 @@ class TerminationsCfg:
 
 @configclass
 class EventCfg:
-    """DreamWaQ Table II 도메인 랜덤화, 몸통 외란 d_t, reset 상태."""
+    """로봇 관절 구성 검사, DreamWaQ Table II 도메인 랜덤화, 몸통 외란 d_t, reset 상태."""
+
+    # 로봇 YAML의 관절 목록이 USD 관절과 같은지 환경 생성 시 확인한다.
+    check_joint_names = EventTerm(func=events.check_joint_names, mode="startup", params={"joint_names": MISSING})
 
     # 기체 특성: 마찰, payload, 무게중심, Kp·Kd, 모터 출력을 환경마다 한 번 샘플링한다.
     physics_material = EventTerm(
@@ -273,26 +277,35 @@ class DreamWaQEnvCfg(ManagerBasedRLEnvCfg):
 
 
 def _load_asset_config(project_root, robot_cfg):
-    """로봇 YAML이 지정한 asset 설정 심볼을 파일에서 읽는다."""
-    asset_path = Path(project_root) / robot_cfg["asset_config"]
-    spec = importlib.util.spec_from_file_location(f"robot_asset_{robot_cfg['id']}", asset_path)
+    """data/robot/assets/{category}/{id}/{id}_cfg.py에서 {ID}_CFG 로봇 asset 설정을 읽는다."""
+    robot_id = robot_cfg["id"]
+    asset_path = Path(project_root) / "data" / "robot" / "assets" / robot_cfg["category"] / robot_id / f"{robot_id}_cfg.py"
+    spec = importlib.util.spec_from_file_location(f"robot_asset_{robot_id}", asset_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return getattr(module, robot_cfg["asset_symbol"])
+    return getattr(module, f"{robot_id.upper()}_CFG")
+
+
+def _controls_any_joint(actuator, joints):
+    """actuator의 관절 목록에 제어 관절이 하나라도 있는지 확인한다."""
+    return any(joint in joints for joint in actuator.joint_names_expr)
 
 
 def build_env_config(config, project_root):
     """로봇 YAML의 asset·관절·링크·명령 범위를 DreamWaQ 환경 설정에 연결한다."""
     robot_cfg = config["robot"]
     command_cfg = config["command"]
-    joints = robot_cfg["controlled_joints"]
-    base = robot_cfg["base"]
+    joints = config["controlled_joints"]
+    base = config["links"]["base"]
+    feet = config["links"]["feet"]
     cfg = DreamWaQEnvCfg()
 
-    # 로봇 asset을 스폰하고 제어 actuator를 출력 배율 PD로 바꾼다.
+    # 로봇 asset을 스폰하고, 제어 관절을 포함한 actuator를 출력 배율 PD로 바꾼다.
     asset = _load_asset_config(project_root, robot_cfg)
     cfg.scene.robot = asset.replace(prim_path="{ENV_REGEX_NS}/Robot")
-    for name in robot_cfg["controlled_actuators"]:
+    controlled_actuators = [name for name, actuator in cfg.scene.robot.actuators.items()
+                            if _controls_any_joint(actuator, joints)]
+    for name in controlled_actuators:
         actuator = cfg.scene.robot.actuators[name]
         cfg.scene.robot.actuators[name] = StrengthPDActuatorCfg(**{
             key: value for key, value in vars(actuator).items() if not key.startswith("_") and key != "class_type"
@@ -310,19 +323,20 @@ def build_env_config(config, project_root):
     cfg.commands.base_velocity.ranges.lin_vel_y = tuple(command_cfg["linear_y"])
     cfg.commands.base_velocity.ranges.ang_vel_z = tuple(command_cfg["angular_z"])
 
-    # 보상의 관절·발 링크와 목표 높이를 연결한다. SceneEntityCfg는 resolve 시 수정되므로 항목마다 새로 만든다.
+    # 보상의 관절·접촉 링크와 데이터시트 높이를 연결한다. SceneEntityCfg는 resolve 시 수정되므로 항목마다 새로 만든다.
     for term in (cfg.rewards.joint_acc, cfg.rewards.joint_power, cfg.rewards.power_distribution):
         term.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=joints)
-    cfg.rewards.body_height.params["target_height"] = robot_cfg["body_height"]
-    cfg.rewards.feet_clearance.params["target_height"] = robot_cfg["foot_clearance_height"]
-    cfg.rewards.feet_clearance.params["asset_cfg"] = SceneEntityCfg(
-        "robot", body_names=robot_cfg["feet"], preserve_order=True)
+    cfg.rewards.body_height.params["target_height"] = robot_cfg["standing_height"] - robot_cfg["root_to_top"]
+    excluded_links = "|".join(re.escape(name) for name in (base, *feet))
+    cfg.rewards.undesired_contacts.params["sensor_cfg"] = SceneEntityCfg(
+        "contact_forces", body_names=f"(?!(?:{excluded_links})$).*")
 
-    # 도메인 랜덤화·외란·종료 대상 링크와 actuator를 연결한다.
+    # 관절 구성 검사, 도메인 랜덤화·외란·종료 대상 링크와 actuator를 연결한다.
+    cfg.events.check_joint_names.params["joint_names"] = config["joints"]
     for term in (cfg.events.add_payload, cfg.events.base_com, cfg.events.disturbance):
         term.params["asset_cfg"] = SceneEntityCfg("robot", body_names=base)
     cfg.events.actuator_gains.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=joints)
-    cfg.events.motor_strength.params["actuator_names"] = robot_cfg["controlled_actuators"]
+    cfg.events.motor_strength.params["actuator_names"] = controlled_actuators
     cfg.terminations.base_contact.params["sensor_cfg"] = SceneEntityCfg("contact_forces", body_names=base)
     return cfg
 

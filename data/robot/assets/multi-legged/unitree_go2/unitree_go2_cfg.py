@@ -41,25 +41,40 @@ UNITREE_GO2_CFG = ArticulationCfg(
         # 기본 자세와 높이는 Unitree 공식 Go2 설정(unitree_rl_gym go2_config.py)을 따른다.
         pos=(0.0, 0.0, 0.42),
         joint_pos={
-            "FL_hip_joint": 0.1,
-            "RL_hip_joint": 0.1,
-            "FR_hip_joint": -0.1,
-            "RR_hip_joint": -0.1,
-            "FL_thigh_joint": 0.8,
-            "FR_thigh_joint": 0.8,
-            "RL_thigh_joint": 1.0,
-            "RR_thigh_joint": 1.0,
-            ".*_calf_joint": -1.5,
+            "FL_hip_joint": 0.1, "FL_thigh_joint": 0.8, "FL_calf_joint": -1.5,
+            "FR_hip_joint": -0.1, "FR_thigh_joint": 0.8, "FR_calf_joint": -1.5,
+            "RL_hip_joint": 0.1, "RL_thigh_joint": 1.0, "RL_calf_joint": -1.5,
+            "RR_hip_joint": -0.1, "RR_thigh_joint": 1.0, "RR_calf_joint": -1.5,
         },
-        joint_vel={".*": 0.0},
+        joint_vel={
+            "FL_hip_joint": 0.0, "FL_thigh_joint": 0.0, "FL_calf_joint": 0.0,
+            "FR_hip_joint": 0.0, "FR_thigh_joint": 0.0, "FR_calf_joint": 0.0,
+            "RL_hip_joint": 0.0, "RL_thigh_joint": 0.0, "RL_calf_joint": 0.0,
+            "RR_hip_joint": 0.0, "RR_thigh_joint": 0.0, "RR_calf_joint": 0.0,
+        },
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
         # 게인은 unitree_rl_gym Go2 설정, 토크·속도 한계는 URDF 값을 따른다.
         "legs": ImplicitActuatorCfg(
-            joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
-            effort_limit={".*_hip_joint": 23.7, ".*_thigh_joint": 23.7, ".*_calf_joint": 45.43},
-            velocity_limit={".*_hip_joint": 30.1, ".*_thigh_joint": 30.1, ".*_calf_joint": 15.7},
+            joint_names_expr=[
+                "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+                "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+                "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+                "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+            ],
+            effort_limit={
+                "FL_hip_joint": 23.7, "FL_thigh_joint": 23.7, "FL_calf_joint": 45.43,
+                "FR_hip_joint": 23.7, "FR_thigh_joint": 23.7, "FR_calf_joint": 45.43,
+                "RL_hip_joint": 23.7, "RL_thigh_joint": 23.7, "RL_calf_joint": 45.43,
+                "RR_hip_joint": 23.7, "RR_thigh_joint": 23.7, "RR_calf_joint": 45.43,
+            },
+            velocity_limit={
+                "FL_hip_joint": 30.1, "FL_thigh_joint": 30.1, "FL_calf_joint": 15.7,
+                "FR_hip_joint": 30.1, "FR_thigh_joint": 30.1, "FR_calf_joint": 15.7,
+                "RL_hip_joint": 30.1, "RL_thigh_joint": 30.1, "RL_calf_joint": 15.7,
+                "RR_hip_joint": 30.1, "RR_thigh_joint": 30.1, "RR_calf_joint": 15.7,
+            },
             stiffness=20.0,
             damping=0.5,
         ),

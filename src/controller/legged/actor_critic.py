@@ -43,14 +43,12 @@ class ActorCritic(nn.Module):
         self._history_length = history_length
 
         # 정책: 현재 관측과 추정 context로 행동 분포를, 가치: 특권 관측으로 상태 가치를 출력한다.
-        self._actor = make_mlp([obs_dim + VELOCITY_DIM + LATENT_DIM, *ACTOR_HIDDEN_DIMS, num_actions],
-                               activation)
+        self._actor = make_mlp([obs_dim + VELOCITY_DIM + LATENT_DIM, *ACTOR_HIDDEN_DIMS, num_actions], activation)
         self._critic = make_mlp([critic_dim, *CRITIC_HIDDEN_DIMS, 1], activation)
         self._log_std = nn.Parameter(torch.full((num_actions,), float(init_noise_std)).log())
 
         # CENet: encoder는 관측 이력으로 속도와 latent 분포를, decoder는 latent로 다음 관측을 출력한다.
-        self._encoder = nn.Sequential(make_mlp([obs_dim * history_length, *ENCODER_HIDDEN_DIMS], activation),
-                                      ACTIVATIONS[activation]())
+        self._encoder = nn.Sequential(make_mlp([obs_dim * history_length, *ENCODER_HIDDEN_DIMS], activation), ACTIVATIONS[activation]())
         self._velocity_head = nn.Linear(ENCODER_HIDDEN_DIMS[-1], VELOCITY_DIM)
         self._latent_mean = nn.Linear(ENCODER_HIDDEN_DIMS[-1], LATENT_DIM)
         self._latent_logvar = nn.Linear(ENCODER_HIDDEN_DIMS[-1], LATENT_DIM)
@@ -69,8 +67,7 @@ class ActorCritic(nn.Module):
         """관측 이력을 프레임별로 정규화해 추정 속도와 latent 평균·로그분산을 반환한다."""
         frames = self._obs_normalizer(history.reshape(-1, self._history_length, self._obs_dim))
         encoded = self._encoder(frames.flatten(1))
-        return (self._velocity_head(encoded), self._latent_mean(encoded),
-                self._latent_logvar(encoded).clamp(-10.0, 10.0))
+        return (self._velocity_head(encoded), self._latent_mean(encoded), self._latent_logvar(encoded).clamp(-10.0, 10.0))
 
     def _action_distribution(self, obs, velocity, latent):
         """현재 관측과 context로 행동 분포를 만든다. context는 PPO 그래디언트에서 분리한다."""

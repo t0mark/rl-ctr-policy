@@ -16,12 +16,8 @@ def load_yaml(relative_path):
 
 
 def load_robot_config(robot_id):
-    """지원하는 로봇 ID의 YAML 설정을 읽는다."""
-    paths = {
-        "unitree_g1": "configs/rl/robot/legged/humanoid/unitree_g1.yaml",
-        "unitree_go2": "configs/rl/robot/legged/multi-legged/unitree_go2.yaml",
-        "boston_dynamics_spot": "configs/rl/robot/legged/multi-legged/boston_dynamics_spot.yaml",
-    }
-    if robot_id not in paths:
-        raise ValueError(f"지원하지 않는 로봇 ID: {robot_id}")
-    return load_yaml(paths[robot_id])
+    """configs/rl/robot/ 아래에서 로봇 ID 이름의 YAML 설정을 찾아 읽는다."""
+    matches = sorted((PROJECT_ROOT / "configs" / "rl" / "robot").rglob(f"{robot_id}.yaml"))
+    if len(matches) != 1:
+        raise FileNotFoundError(f"로봇 ID {robot_id}의 설정 파일이 하나가 아닙니다: {matches}")
+    return yaml.safe_load(matches[0].read_text())

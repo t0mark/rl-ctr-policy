@@ -1,17 +1,49 @@
 robot:
   id: boston_dynamics_spot
-  asset_config: data/robot/assets/multi-legged/boston_dynamics_spot/boston_dynamics_spot_cfg.py
-  asset_symbol: BOSTON_DYNAMICS_SPOT_CFG
-  controlled_actuators: [hips, knees]
-  controlled_joints:
-    - ".*_h[xy]"
-    - ".*_kn"
+  category: multi-legged
+  # 데이터시트의 보행 기본 높이(m, 지면~몸체 최상단). 출처: Boston Dynamics Spot 스펙시트(2024-05-22) Default Height (Walking) 610 mm
+  standing_height: 0.61
+  # 목표 root 높이 = standing_height - root_to_top
+  root_to_top: 0.095
+
+# 로봇의 전체 관절. 환경 생성 시 USD 관절 목록과 같은지 검사한다.
+joints:
+  - fl_hx
+  - fl_hy
+  - fl_kn
+  - fr_hx
+  - fr_hy
+  - fr_kn
+  - hl_hx
+  - hl_hy
+  - hl_kn
+  - hr_hx
+  - hr_hy
+  - hr_kn
+
+# 정책이 제어하는 관절.
+controlled_joints:
+  - fl_hx
+  - fl_hy
+  - fl_kn
+  - fr_hx
+  - fr_hy
+  - fr_kn
+  - hl_hx
+  - hl_hy
+  - hl_kn
+  - hr_hx
+  - hr_hy
+  - hr_kn
+
+links:
+  # 몸통 링크. 높이 스캐너·외란·payload가 붙고, 지면에 닿으면 episode를 종료한다.
   base: body
+  # 발 링크. base와 함께 지면 접촉 페널티에서 제외된다.
   feet: [fl_foot, fr_foot, hl_foot, hr_foot]
-  body_height: 0.5
-  foot_clearance_height: 0.1
 
 control:
+  # 관절 목표각 = 기본 자세 + action_scale × action
   action_scale: 0.2
 
 command:

@@ -28,9 +28,10 @@ class DelayedJointPositionAction(JointPositionAction):
         return self._joint_names
 
     def apply_actions(self):
-        """현재 목표를 큐에 넣고 지연된 목표를 physics에 전달한다."""
+        """현재 목표를 큐에 넣고 지연된 목표를 physics에 전달한다. 제어하지 않는 관절은 기본 자세를 유지한다."""
         self._queue[self._cursor] = self.processed_actions
         target = self._queue[(self._cursor - self._delay_ticks) % self._queue.shape[0], self._env_indices]
+        self._asset.set_joint_position_target(self._asset.data.default_joint_pos)
         self._asset.set_joint_position_target(target, joint_ids=self._joint_ids)
         self._cursor = (self._cursor + 1) % self._queue.shape[0]
 

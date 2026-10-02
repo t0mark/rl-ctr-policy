@@ -1,18 +1,49 @@
 robot:
   id: unitree_go2
-  asset_config: data/robot/assets/multi-legged/unitree_go2/unitree_go2_cfg.py
-  asset_symbol: UNITREE_GO2_CFG
-  controlled_actuators: [legs]
-  controlled_joints:
-    - ".*_hip_joint"
-    - ".*_thigh_joint"
-    - ".*_calf_joint"
+  category: multi-legged
+  # 데이터시트의 서 있는 높이(m, 지면~몸체 최상단). 출처: Unitree Go2 사양 700×310×400 mm (standing)
+  standing_height: 0.40
+  # 목표 root 높이 = standing_height - root_to_top
+  root_to_top: 0.089
+
+# 로봇의 전체 관절. 환경 생성 시 USD 관절 목록과 같은지 검사한다.
+joints:
+  - FL_hip_joint
+  - FL_thigh_joint
+  - FL_calf_joint
+  - FR_hip_joint
+  - FR_thigh_joint
+  - FR_calf_joint
+  - RL_hip_joint
+  - RL_thigh_joint
+  - RL_calf_joint
+  - RR_hip_joint
+  - RR_thigh_joint
+  - RR_calf_joint
+
+# 정책이 제어하는 관절.
+controlled_joints:
+  - FL_hip_joint
+  - FL_thigh_joint
+  - FL_calf_joint
+  - FR_hip_joint
+  - FR_thigh_joint
+  - FR_calf_joint
+  - RL_hip_joint
+  - RL_thigh_joint
+  - RL_calf_joint
+  - RR_hip_joint
+  - RR_thigh_joint
+  - RR_calf_joint
+
+links:
+  # 몸통 링크. 높이 스캐너·외란·payload가 붙고, 지면에 닿으면 episode를 종료한다.
   base: base
+  # 발 링크. base와 함께 지면 접촉 페널티에서 제외된다.
   feet: [FL_foot, FR_foot, RL_foot, RR_foot]
-  body_height: 0.25
-  foot_clearance_height: 0.08
 
 control:
+  # 관절 목표각 = 기본 자세 + action_scale × action
   action_scale: 0.25
 
 command:

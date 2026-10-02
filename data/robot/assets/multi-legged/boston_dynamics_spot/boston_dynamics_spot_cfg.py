@@ -40,26 +40,30 @@ BOSTON_DYNAMICS_SPOT_CFG = ArticulationCfg(
         # 기본 자세와 높이는 Isaac Lab SPOT_CFG를 따른다.
         pos=(0.0, 0.0, 0.5),
         joint_pos={
-            "[fh]l_hx": 0.1,
-            "[fh]r_hx": -0.1,
-            "f[rl]_hy": 0.9,
-            "h[rl]_hy": 1.1,
-            ".*_kn": -1.5,
+            "fl_hx": 0.1, "fl_hy": 0.9, "fl_kn": -1.5,
+            "fr_hx": -0.1, "fr_hy": 0.9, "fr_kn": -1.5,
+            "hl_hx": 0.1, "hl_hy": 1.1, "hl_kn": -1.5,
+            "hr_hx": -0.1, "hr_hy": 1.1, "hr_kn": -1.5,
         },
-        joint_vel={".*": 0.0},
+        joint_vel={
+            "fl_hx": 0.0, "fl_hy": 0.0, "fl_kn": 0.0,
+            "fr_hx": 0.0, "fr_hy": 0.0, "fr_kn": 0.0,
+            "hl_hx": 0.0, "hl_hy": 0.0, "hl_kn": 0.0,
+            "hr_hx": 0.0, "hr_hy": 0.0, "hr_kn": 0.0,
+        },
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
         # 게인과 고관절 토크 한계는 Isaac Lab SPOT_CFG를 따른다.
         "hips": ImplicitActuatorCfg(
-            joint_names_expr=[".*_h[xy]"],
+            joint_names_expr=["fl_hx", "fl_hy", "fr_hx", "fr_hy", "hl_hx", "hl_hy", "hr_hx", "hr_hy"],
             effort_limit=45.0,
             stiffness=60.0,
             damping=1.5,
         ),
         # 무릎 토크 한계는 Isaac Lab 무릎 remotized 룩업 테이블의 보행 구간(-2.0~-1.0 rad) 대표값으로 근사한다.
         "knees": ImplicitActuatorCfg(
-            joint_names_expr=[".*_kn"],
+            joint_names_expr=["fl_kn", "fr_kn", "hl_kn", "hr_kn"],
             effort_limit=100.0,
             stiffness=60.0,
             damping=1.5,

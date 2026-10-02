@@ -1,10 +1,10 @@
 # Copyright (c) 2026 DreamWaQ Project
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Unitree G1(다리 12 + 허리 3 = 15 DOF) Isaac Lab ArticulationCfg.
+"""Unitree G1(다리 12 + 허리 3 + 팔 14 = 29 DOF) Isaac Lab ArticulationCfg.
 
 data/robot/assets/humanoid/unitree_g1/usd/unitree_g1.usd를 스폰한다.
-팔 14관절은 USD에서 fixed 관절이므로 자유도에 포함되지 않는다.
+USD는 URDF의 fixed 관절을 병합해 변환했다.
 """
 
 import os
@@ -20,7 +20,7 @@ _USD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usd", "uni
 # 기본 자세의 무릎 굽힘각(rad). 자세 후보 스윕에서 토크 여유가 가장 큰 값
 _KNEE_FLEXION = 0.30
 
-# 고관절·발목 pitch의 배분 편차(rad). 
+# 고관절·발목 pitch의 배분 편차(rad).
 # 허벅지·정강이 길이가 같으므로 각각 무릎각의 절반이 기준이며, 이 편차만큼 무게중심을 앞뒤로 옮긴다.
 _HIP_ANKLE_SPLIT = 0.043
 
@@ -50,56 +50,107 @@ UNITREE_G1_CFG = ArticulationCfg(
         joint_pos={
             # 다리
             "left_hip_pitch_joint": -0.5 * _KNEE_FLEXION + _HIP_ANKLE_SPLIT,
-            "right_hip_pitch_joint": -0.5 * _KNEE_FLEXION + _HIP_ANKLE_SPLIT,
             "left_hip_roll_joint": 0.0,
-            "right_hip_roll_joint": 0.0,
             "left_hip_yaw_joint": 0.0,
-            "right_hip_yaw_joint": 0.0,
             "left_knee_joint": _KNEE_FLEXION,
-            "right_knee_joint": _KNEE_FLEXION,
             "left_ankle_pitch_joint": -0.5 * _KNEE_FLEXION - _HIP_ANKLE_SPLIT,
-            "right_ankle_pitch_joint": -0.5 * _KNEE_FLEXION - _HIP_ANKLE_SPLIT,
             "left_ankle_roll_joint": 0.0,
+            "right_hip_pitch_joint": -0.5 * _KNEE_FLEXION + _HIP_ANKLE_SPLIT,
+            "right_hip_roll_joint": 0.0,
+            "right_hip_yaw_joint": 0.0,
+            "right_knee_joint": _KNEE_FLEXION,
+            "right_ankle_pitch_joint": -0.5 * _KNEE_FLEXION - _HIP_ANKLE_SPLIT,
             "right_ankle_roll_joint": 0.0,
             # 허리
             "waist_yaw_joint": 0.0,
             "waist_roll_joint": 0.0,
             "waist_pitch_joint": 0.0,
+            # 팔
+            "left_shoulder_pitch_joint": 0.0,
+            "left_shoulder_roll_joint": 0.0,
+            "left_shoulder_yaw_joint": 0.0,
+            "left_elbow_joint": 0.0,
+            "left_wrist_roll_joint": 0.0,
+            "left_wrist_pitch_joint": 0.0,
+            "left_wrist_yaw_joint": 0.0,
+            "right_shoulder_pitch_joint": 0.0,
+            "right_shoulder_roll_joint": 0.0,
+            "right_shoulder_yaw_joint": 0.0,
+            "right_elbow_joint": 0.0,
+            "right_wrist_roll_joint": 0.0,
+            "right_wrist_pitch_joint": 0.0,
+            "right_wrist_yaw_joint": 0.0,
         },
-        joint_vel={".*": 0.0},
+        joint_vel={
+            "left_hip_pitch_joint": 0.0,
+            "left_hip_roll_joint": 0.0,
+            "left_hip_yaw_joint": 0.0,
+            "left_knee_joint": 0.0,
+            "left_ankle_pitch_joint": 0.0,
+            "left_ankle_roll_joint": 0.0,
+            "right_hip_pitch_joint": 0.0,
+            "right_hip_roll_joint": 0.0,
+            "right_hip_yaw_joint": 0.0,
+            "right_knee_joint": 0.0,
+            "right_ankle_pitch_joint": 0.0,
+            "right_ankle_roll_joint": 0.0,
+            "waist_yaw_joint": 0.0,
+            "waist_roll_joint": 0.0,
+            "waist_pitch_joint": 0.0,
+            "left_shoulder_pitch_joint": 0.0,
+            "left_shoulder_roll_joint": 0.0,
+            "left_shoulder_yaw_joint": 0.0,
+            "left_elbow_joint": 0.0,
+            "left_wrist_roll_joint": 0.0,
+            "left_wrist_pitch_joint": 0.0,
+            "left_wrist_yaw_joint": 0.0,
+            "right_shoulder_pitch_joint": 0.0,
+            "right_shoulder_roll_joint": 0.0,
+            "right_shoulder_yaw_joint": 0.0,
+            "right_elbow_joint": 0.0,
+            "right_wrist_roll_joint": 0.0,
+            "right_wrist_pitch_joint": 0.0,
+            "right_wrist_yaw_joint": 0.0,
+        },
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
         # 게인과 토크 한계는 Unitree 공식 G1 설정(unitree_rl_gym, g1_29dof.urdf)을 따른다.
         "legs": ImplicitActuatorCfg(
-            joint_names_expr=[".*_hip_yaw_joint", ".*_hip_roll_joint", ".*_hip_pitch_joint", ".*_knee_joint"],
+            joint_names_expr=[
+                "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint",
+                "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint",
+            ],
             effort_limit={
-                ".*_hip_yaw_joint": 88.0,
-                ".*_hip_roll_joint": 88.0,
-                ".*_hip_pitch_joint": 88.0,
-                ".*_knee_joint": 139.0,
+                "left_hip_pitch_joint": 88.0, "left_hip_roll_joint": 88.0,
+                "left_hip_yaw_joint": 88.0, "left_knee_joint": 139.0,
+                "right_hip_pitch_joint": 88.0, "right_hip_roll_joint": 88.0,
+                "right_hip_yaw_joint": 88.0, "right_knee_joint": 139.0,
             },
             velocity_limit_sim=None,
             stiffness={
-                ".*_hip_yaw_joint": 100.0,
-                ".*_hip_roll_joint": 100.0,
-                ".*_hip_pitch_joint": 100.0,
-                ".*_knee_joint": 150.0,
+                "left_hip_pitch_joint": 100.0, "left_hip_roll_joint": 100.0,
+                "left_hip_yaw_joint": 100.0, "left_knee_joint": 150.0,
+                "right_hip_pitch_joint": 100.0, "right_hip_roll_joint": 100.0,
+                "right_hip_yaw_joint": 100.0, "right_knee_joint": 150.0,
             },
             damping={
-                ".*_hip_yaw_joint": 2.0,
-                ".*_hip_roll_joint": 2.0,
-                ".*_hip_pitch_joint": 2.0,
-                ".*_knee_joint": 4.0,
+                "left_hip_pitch_joint": 2.0, "left_hip_roll_joint": 2.0,
+                "left_hip_yaw_joint": 2.0, "left_knee_joint": 4.0,
+                "right_hip_pitch_joint": 2.0, "right_hip_roll_joint": 2.0,
+                "right_hip_yaw_joint": 2.0, "right_knee_joint": 4.0,
             },
             armature=0.03,
         ),
         "feet": ImplicitActuatorCfg(
-            joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
-            effort_limit={".*_ankle_pitch_joint": 35.0, ".*_ankle_roll_joint": 35.0},
+            joint_names_expr=[
+                "left_ankle_pitch_joint", "left_ankle_roll_joint",
+                "right_ankle_pitch_joint", "right_ankle_roll_joint",
+            ],
+            effort_limit=35.0,
             velocity_limit_sim=None,
-            stiffness={".*_ankle_pitch_joint": 40.0, ".*_ankle_roll_joint": 40.0},
-            damping={".*_ankle_pitch_joint": 2.0, ".*_ankle_roll_joint": 2.0},
+            stiffness=40.0,
+            damping=2.0,
             armature=0.03,
         ),
         # 허리는 상체 자세를 유지하면서 실기 토크 한계 안에서 움직이는 게인을 쓴다.
@@ -109,6 +160,27 @@ UNITREE_G1_CFG = ArticulationCfg(
             velocity_limit_sim=None,
             stiffness=300.0,
             damping=3.0,
+            armature=0.001,
+        ),
+        # 팔은 기본 자세를 유지한다. 게인은 Isaac Lab G1 29-DOF 설정, 토크 한계는 URDF 값을 따른다.
+        "arms": ImplicitActuatorCfg(
+            joint_names_expr=[
+                "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+                "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+                "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+                "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+            ],
+            effort_limit={
+                "left_shoulder_pitch_joint": 25.0, "left_shoulder_roll_joint": 25.0,
+                "left_shoulder_yaw_joint": 25.0, "left_elbow_joint": 25.0, "left_wrist_roll_joint": 25.0,
+                "left_wrist_pitch_joint": 13.4, "left_wrist_yaw_joint": 13.4,
+                "right_shoulder_pitch_joint": 25.0, "right_shoulder_roll_joint": 25.0,
+                "right_shoulder_yaw_joint": 25.0, "right_elbow_joint": 25.0, "right_wrist_roll_joint": 25.0,
+                "right_wrist_pitch_joint": 13.4, "right_wrist_yaw_joint": 13.4,
+            },
+            velocity_limit_sim=None,
+            stiffness=3000.0,
+            damping=10.0,
             armature=0.001,
         ),
     },
