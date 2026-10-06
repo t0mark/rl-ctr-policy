@@ -34,8 +34,9 @@ services:
       resources:
         reservations:
           devices:
+            # 컨테이너에 노출할 GPU 번호 (예: ISAAC_GPU_IDS=0,1 docker compose up -d)
             - driver: nvidia
-              count: all
+              device_ids: ["${ISAAC_GPU_IDS:-0,1,2,3}"]
               capabilities: ["gpu"]
     stdin_open: true
     tty: true

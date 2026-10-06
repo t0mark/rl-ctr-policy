@@ -32,47 +32,47 @@
 import torch
 from torch import nn
 
+# 최적화 반복: rollout 하나를 나누는 미니배치 수와 반복 epoch 수.
+NUM_LEARNING_EPOCHS = 5
+NUM_MINI_BATCHES = 4
+
+# 학습률: 초기값과 KL 기반 adaptive 조정의 목표 KL.
+LEARNING_RATE = 1.0e-3
+LEARNING_RATE_SCHEDULE = "adaptive"
+DESIRED_KL = 0.01
+
+# GAE 할인율과 λ 계수.
+GAMMA = 0.99
+GAE_LAMBDA = 0.95
+
+# PPO 손실: clip 범위, 가치 손실 clip 사용 여부, 가치·엔트로피 가중치, gradient norm 한계.
+CLIP_PARAM = 0.2
+USE_CLIPPED_VALUE_LOSS = True
+VALUE_LOSS_COEF = 1.0
+ENTROPY_COEF = 0.01
+MAX_GRAD_NORM = 1.0
+
+# CENet 손실 가중치: 속도 MSE, 다음 관측 복원 MSE, latent KL(β).
+VELOCITY_LOSS_COEF = 1.0
+PREDICTION_LOSS_COEF = 1.0
+# 복원 손실은 관측 차원 평균이고 KL은 잠재 차원 합이므로, 두 항의 크기를 맞추는 배율이다.
+BETA = 0.02
+
 
 class PPO:
     """저장된 rollout으로 clipped surrogate·가치·엔트로피·추정기 손실을 최적화한다."""
 
-    def __init__(self, actor_critic, learning_rate=1e-3, num_learning_epochs=5,
-                 num_mini_batches=4, clip_param=0.2, gamma=0.99, lam=0.95,
-                 value_loss_coef=1.0, entropy_coef=0.01, max_grad_norm=1.0,
-                 use_clipped_value_loss=True, schedule="adaptive", desired_kl=0.01,
-                 velocity_loss_coef=1.0, prediction_loss_coef=1.0, beta=1.0):
-        """최적화 대상 모델, 옵티마이저, 손실 가중치를 저장한다."""
+    def __init__(self, actor_critic):
+        """최적화 대상 모델과 옵티마이저를 저장한다."""
         # 정책·가치·추정기 파라미터 전체를 하나의 Adam으로 최적화한다.
         self._actor_critic = actor_critic
-        self._optimizer = torch.optim.Adam(actor_critic.parameters(), lr=learning_rate)
-
-        # 학습 설정: 반복 횟수, GAE 계수, PPO·추정기 손실 가중치, 학습률 조정 방식을 저장한다.
-        self._epochs = num_learning_epochs
-        self._batches = num_mini_batches
-        self._clip = clip_param
-        self._gamma, self._lam = gamma, lam
-        self._value_coef, self._entropy_coef = value_loss_coef, entropy_coef
-        self._grad_norm = max_grad_norm
-        self._clipped_value = use_clipped_value_loss
-        self._schedule, self._desired_kl = schedule, desired_kl
-        self._velocity_coef, self._prediction_coef = velocity_loss_coef, prediction_loss_coef
-        self._beta = beta
-
-    @property
-    def gamma(self):
-        """GAE 계산에 사용할 할인율을 반환한다."""
-        return self._gamma
-
-    @property
-    def lam(self):
-        """GAE 계산에 사용할 λ 계수를 반환한다."""
-        return self._lam
+        self._optimizer = torch.optim.Adam(actor_critic.parameters(), lr=LEARNING_RATE)
 
     def update(self, storage):
         """rollout 전체를 epoch·미니배치 단위로 반복 학습하고 손실 평균을 반환한다."""
         totals = {}
         count = 0
-        for batch in storage.batches(self._batches, self._epochs):
+        for batch in storage.batches(NUM_MINI_BATCHES, NUM_LEARNING_EPOCHS):
             # 모델 출력: rollout과 같은 입력 조건으로 현재 정책 분포·가치·추정기 손실을 계산한다.
             policy, velocity, prediction, latent_kl = self._actor_critic.training_terms(
                 batch["obs"], batch["history"], batch["velocity"], batch["use_estimate"],
@@ -85,11 +85,11 @@ class PPO:
                 kl = (torch.log(policy.scale / batch["std"])
                       + (batch["std"].square() + (batch["mean"] - policy.mean).square())
                       / (2 * policy.scale.square()) - 0.5).sum(-1).mean()
-                if self._schedule == "adaptive":
+                if LEARNING_RATE_SCHEDULE == "adaptive":
                     rate = self._optimizer.param_groups[0]["lr"]
-                    if kl > 2 * self._desired_kl:
+                    if kl > 2 * DESIRED_KL:
                         rate = max(1e-5, rate / 1.5)
-                    elif 0 < kl < self._desired_kl / 2:
+                    elif 0 < kl < DESIRED_KL / 2:
                         rate = min(1e-2, rate * 1.5)
                     for group in self._optimizer.param_groups:
                         group["lr"] = rate
@@ -98,21 +98,21 @@ class PPO:
             ratio = (log_prob - batch["log_prob"]).exp()
             surrogate = torch.maximum(
                 -batch["advantages"] * ratio,
-                -batch["advantages"] * ratio.clamp(1-self._clip, 1+self._clip)).mean()
+                -batch["advantages"] * ratio.clamp(1-CLIP_PARAM, 1+CLIP_PARAM)).mean()
             value_error = (values - batch["returns"]).square()
-            if self._clipped_value:
-                clipped = batch["values"] + (values - batch["values"]).clamp(-self._clip, self._clip)
+            if USE_CLIPPED_VALUE_LOSS:
+                clipped = batch["values"] + (values - batch["values"]).clamp(-CLIP_PARAM, CLIP_PARAM)
                 value_error = torch.maximum(value_error, (clipped - batch["returns"]).square())
             value_loss = value_error.mean()
             entropy = policy.entropy().sum(-1).mean()
-            loss = (surrogate + self._value_coef * value_loss - self._entropy_coef * entropy
-                    + self._velocity_coef * velocity + self._prediction_coef * prediction
-                    + self._beta * latent_kl)
+            loss = (surrogate + VALUE_LOSS_COEF * value_loss - ENTROPY_COEF * entropy
+                    + VELOCITY_LOSS_COEF * velocity + PREDICTION_LOSS_COEF * prediction
+                    + BETA * latent_kl)
 
             # 파라미터 갱신: gradient norm을 제한해 한 번 갱신하고 지표를 GPU 텐서로 누적한다.
             self._optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            grad_norm = nn.utils.clip_grad_norm_(self._actor_critic.parameters(), self._grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(self._actor_critic.parameters(), MAX_GRAD_NORM)
             self._optimizer.step()
             metrics = {"surrogate": surrogate, "value": value_loss, "velocity": velocity,
                        "prediction": prediction, "latent_kl": latent_kl, "policy_kl": kl,

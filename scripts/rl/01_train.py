@@ -13,6 +13,7 @@
 
 산출물 경로:
     data/robot/policy/{robot-id}/{실행시각}/model_{iteration}.pt
+    data/robot/policy/{robot-id}/{실행시각}/model_best.pt (평균 지형 레벨 최고 정책)
 """
 
 import argparse
@@ -54,7 +55,7 @@ def main():
         if args.seed is not None:
             cfg.seed = args.seed
         env = ManagerBasedRLEnv(cfg=cfg)
-        adapter = EnvironmentAdapter(env, TRAIN_CONFIG["policy"]["history_length"])
+        adapter = EnvironmentAdapter(env)
         run_dir = create_run_dir(args.robot_id)
         run_io = RunIO(run_dir)
         runner = OnPolicyRunner(adapter, TRAIN_CONFIG, run_io=run_io, device=args.device)

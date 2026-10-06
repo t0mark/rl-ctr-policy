@@ -15,6 +15,14 @@ DECODER_HIDDEN_DIMS = [64, 128]
 VELOCITY_DIM = 3
 LATENT_DIM = 16
 
+# CENet encoder가 입력받는 관측 프레임 수(H).
+HISTORY_LENGTH = 5
+
+# 은닉층 활성화 함수, 행동 분포의 초기 표준편차, 관측 정규화의 최소 표준편차.
+ACTIVATION = "elu"
+INIT_NOISE_STD = 1.0
+NORMALIZATION_MIN_STD = 0.1
+
 ACTIVATIONS = {"elu": nn.ELU, "relu": nn.ReLU, "tanh": nn.Tanh}
 
 
@@ -35,28 +43,27 @@ class ActorCritic(nn.Module):
     critic은 특권 관측 s_t를 입력받는다. CENet은 β-VAE 구조로 decoder가 z_t에서 o_{t+1}을 복원한다.
     """
 
-    def __init__(self, obs_dim, critic_dim, num_actions, history_length, activation="elu",
-                 init_noise_std=1.0, normalization_min_std=0.1):
+    def __init__(self, obs_dim, critic_dim, num_actions):
         """정책·가치·CENet 네트워크와 관측 정규화 통계를 생성한다."""
         super().__init__()
         self._obs_dim = obs_dim
-        self._history_length = history_length
+        self._history_length = HISTORY_LENGTH
 
         # 정책: 현재 관측과 추정 context로 행동 분포를, 가치: 특권 관측으로 상태 가치를 출력한다.
-        self._actor = make_mlp([obs_dim + VELOCITY_DIM + LATENT_DIM, *ACTOR_HIDDEN_DIMS, num_actions], activation)
-        self._critic = make_mlp([critic_dim, *CRITIC_HIDDEN_DIMS, 1], activation)
-        self._log_std = nn.Parameter(torch.full((num_actions,), float(init_noise_std)).log())
+        self._actor = make_mlp([obs_dim + VELOCITY_DIM + LATENT_DIM, *ACTOR_HIDDEN_DIMS, num_actions], ACTIVATION)
+        self._critic = make_mlp([critic_dim, *CRITIC_HIDDEN_DIMS, 1], ACTIVATION)
+        self._log_std = nn.Parameter(torch.full((num_actions,), float(INIT_NOISE_STD)).log())
 
         # CENet: encoder는 관측 이력으로 속도와 latent 분포를, decoder는 latent로 다음 관측을 출력한다.
-        self._encoder = nn.Sequential(make_mlp([obs_dim * history_length, *ENCODER_HIDDEN_DIMS], activation), ACTIVATIONS[activation]())
+        self._encoder = nn.Sequential(make_mlp([obs_dim * HISTORY_LENGTH, *ENCODER_HIDDEN_DIMS], ACTIVATION), ACTIVATIONS[ACTIVATION]())
         self._velocity_head = nn.Linear(ENCODER_HIDDEN_DIMS[-1], VELOCITY_DIM)
         self._latent_mean = nn.Linear(ENCODER_HIDDEN_DIMS[-1], LATENT_DIM)
         self._latent_logvar = nn.Linear(ENCODER_HIDDEN_DIMS[-1], LATENT_DIM)
-        self._decoder = make_mlp([LATENT_DIM, *DECODER_HIDDEN_DIMS, obs_dim], activation)
+        self._decoder = make_mlp([LATENT_DIM, *DECODER_HIDDEN_DIMS, obs_dim], ACTIVATION)
 
         # 관측·특권 관측 정규화 통계를 모델 버퍼로 보관한다.
-        self._obs_normalizer = RunningNormalizer(obs_dim, normalization_min_std)
-        self._critic_normalizer = RunningNormalizer(critic_dim, normalization_min_std)
+        self._obs_normalizer = RunningNormalizer(obs_dim, NORMALIZATION_MIN_STD)
+        self._critic_normalizer = RunningNormalizer(critic_dim, NORMALIZATION_MIN_STD)
 
     @property
     def history_length(self):

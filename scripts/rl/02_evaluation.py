@@ -61,7 +61,7 @@ def main():
         cfg.seed = args.seed
         configure_evaluation(cfg, command, args.terrain == "flat", args.noise)
         env = ManagerBasedRLEnv(cfg=cfg)
-        adapter = EnvironmentAdapter(env, train_cfg["policy"]["history_length"])
+        adapter = EnvironmentAdapter(env)
         runner = OnPolicyRunner(adapter, train_cfg, device=args.device)
         try:
             # 모델을 적재하고 평가한 뒤 보고서를 터미널과 JSON 파일에 기록한다.

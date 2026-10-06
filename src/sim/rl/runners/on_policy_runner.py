@@ -38,15 +38,22 @@ import torch
 
 from src.controller.legged import ActorCritic
 from src.sim.rl.algorithms.adaboot import AdaBoot
-from src.sim.rl.algorithms.ppo import PPO
+from src.sim.rl.algorithms.ppo import GAE_LAMBDA, GAMMA, PPO
 from src.sim.rl.storage.rollout_storage import RolloutStorage
 
 log = logging.getLogger(__name__)
+
+# iteration마다 환경별로 수집하는 rollout 스텝 수.
+NUM_STEPS_PER_ENV = 24
+
+# 평균 지형 레벨이 가장 높았던 정책을 저장하는 checkpoint 파일명.
+BEST_CHECKPOINT_NAME = "model_best.pt"
 
 # 터미널에 요약하는 학습 지표와 표시 이름. 전체 지표는 TensorBoard에 기록한다.
 _CONSOLE_FIELDS = (
     ("episode_return", "Return"),
     ("episode_length_s", "Episode s"),
+    ("terrain_level", "Terrain level"),
     ("velocity", "Velocity MSE"),
     ("adaboot_probability", "AdaBoot p"),
     ("value", "Value loss"),
@@ -75,21 +82,19 @@ class OnPolicyRunner:
         self._run_io = run_io
 
         # 모델·알고리즘: DreamWaQ actor-critic 하나를 PPO와 AdaBoot로 학습한다.
-        self._model = ActorCritic(env.num_obs, env.num_critic_obs, env.num_actions,
-                                  **self._cfg["policy"]).to(self._device)
+        self._model = ActorCritic(env.num_obs, env.num_critic_obs, env.num_actions).to(self._device)
         log.info("model parameters=%d", sum(parameter.numel() for parameter in self._model.parameters()))
-        self._algorithm = PPO(self._model, **self._cfg["algorithm"])
-        self._adaboot = AdaBoot(env.num_envs, self._device, **self._cfg["adaboot"])
+        self._algorithm = PPO(self._model)
+        self._adaboot = AdaBoot(env.num_envs, self._device)
 
-        # 학습 상태: rollout 저장소, 반복 횟수, 기록용 episode return·길이를 준비한다.
-        runner_cfg = self._cfg["runner"]
-        self._steps = runner_cfg["num_steps_per_env"]
-        self._save_interval = runner_cfg["save_interval"]
-        self._storage = RolloutStorage(env.num_envs, self._steps, env.num_obs, env.num_critic_obs,
+        # 학습 상태: rollout 저장소, 반복 횟수, 기록용 episode return·길이, 최고 지형 레벨을 준비한다.
+        self._save_interval = self._cfg["runner"]["save_interval"]
+        self._storage = RolloutStorage(env.num_envs, NUM_STEPS_PER_ENV, env.num_obs, env.num_critic_obs,
                                        env.num_obs * env.history_length, env.num_actions, self._device)
         self._iteration = 0
         self._episode_return = torch.zeros(env.num_envs, device=self._device)
         self._episode_steps = torch.zeros(env.num_envs, device=self._device)
+        self._best_terrain_level = float("-inf")
 
     def learn(self, num_learning_iterations):
         """rollout 수집과 PPO 갱신을 반복하고 지표와 checkpoint를 기록한다."""
@@ -107,7 +112,7 @@ class OnPolicyRunner:
             completed_returns, completed_lengths = [], []
             log_sums, log_counts = {}, {}
             with torch.no_grad():
-                for _ in range(self._steps):
+                for _ in range(NUM_STEPS_PER_ENV):
                     # 행동 샘플링: AdaBoot로 정책의 속도 입력을 고르고 행동·가치를 계산한다.
                     use_estimate = torch.rand(self._env.num_envs, device=self._device) < probability
                     policy = self._model.distribution(observation["obs"], observation["history"],
@@ -126,7 +131,7 @@ class OnPolicyRunner:
                     observation, result = self._env.step(actions)
                     dones = result["dones"]
                     transition.update({
-                        "rewards": result["rewards"] + self._algorithm.gamma * values * result["time_outs"],
+                        "rewards": result["rewards"] + GAMMA * values * result["time_outs"],
                         "dones": dones.float(), "next_obs": result["next_obs"],
                     })
                     self._storage.add(transition)
@@ -145,18 +150,21 @@ class OnPolicyRunner:
                 last_values = self._model.evaluate(observation["critic"])
 
             # 모델 갱신: PPO로 actor·critic·CENet을 갱신하고 사용한 rollout으로 정규화 통계를 갱신한다.
-            self._storage.compute_returns(last_values, self._algorithm.gamma, self._algorithm.lam)
+            self._storage.compute_returns(last_values, GAMMA, GAE_LAMBDA)
             metrics = self._algorithm.update(self._storage)
             self._model.update_normalizers(*self._storage.normalization_data())
             self._storage.clear()
             self._iteration += 1
 
-            # 지표 기록: episode 통계·AdaBoot 확률·manager 로그를 TensorBoard와 터미널에 기록한다.
+            # 지표 기록: episode 통계·지형 레벨·AdaBoot 확률·manager 로그를 TensorBoard와 터미널에 기록한다.
             returns = torch.cat(completed_returns)
             lengths = torch.cat(completed_lengths)
             if returns.numel():
                 metrics["episode_return"] = returns.mean().item()
                 metrics["episode_length_s"] = (lengths.mean() * self._env.step_dt).item()
+            terrain_level = self._env.terrain_level
+            if terrain_level is not None:
+                metrics["terrain_level"] = terrain_level.item()
             metrics["adaboot_probability"] = float(probability)
             metrics.update({f"Manager/{key}": (value / log_counts[key]).item() for key, value in log_sums.items()})
             if self._run_io is not None:
@@ -168,6 +176,14 @@ class OnPolicyRunner:
             # checkpoint 저장: 저장 주기마다 저장한다.
             if self._run_io is not None and self._iteration % self._save_interval == 0:
                 self._run_io.save_checkpoint(f"model_{self._iteration}.pt", self.state_dict())
+
+            # best policy 저장: 평균 지형 레벨이 최고값을 넘으면 best checkpoint를 덮어쓴다.
+            if "terrain_level" in metrics and metrics["terrain_level"] > self._best_terrain_level:
+                self._best_terrain_level = metrics["terrain_level"]
+                if self._run_io is not None:
+                    self._run_io.save_checkpoint(BEST_CHECKPOINT_NAME, self.state_dict())
+                    log.info("best policy saved: iteration=%d terrain_level=%.4f",
+                             self._iteration, self._best_terrain_level)
 
         # 학습이 끝나면 마지막 checkpoint를 저장한다.
         if self._run_io is not None:
@@ -217,15 +233,17 @@ class OnPolicyRunner:
             "optimizer_state_dict": self._algorithm.state_dict(),
             "adaboot": self._adaboot.state_dict(),
             "iteration": self._iteration,
+            "best_terrain_level": self._best_terrain_level,
         }
 
     def load_state_dict(self, checkpoint, resume=True):
-        """모델을 복원하고, resume이면 optimizer·AdaBoot·반복 횟수까지 복원한다."""
+        """모델을 복원하고, resume이면 optimizer·AdaBoot·반복 횟수·최고 지형 레벨까지 복원한다."""
         self._model.load_state_dict(checkpoint["model_state_dict"])
         self._iteration = checkpoint["iteration"]
         if resume:
             self._algorithm.load_state_dict(checkpoint["optimizer_state_dict"])
             self._adaboot.load_state_dict(checkpoint["adaboot"])
+            self._best_terrain_level = checkpoint.get("best_terrain_level", float("-inf"))
         log.info("checkpoint loaded: iteration=%d resume=%s", self._iteration, resume)
 
     def get_inference_policy(self):
